@@ -1,0 +1,27 @@
+# Reusable task template to display run summary
+
+parameters:
+  - name: runType
+    type: string
+    values:
+      - speculative
+      - apply
+  - name: runId
+    type: string
+    default: '$(create_run.RUN_ID)'
+
+steps:
+  - script: |
+      echo "=== HCP Terraform ${{ parameters.runType }} Summary ==="
+      echo "Build: $(Build.BuildId)"
+      echo "Commit: $(Build.SourceVersion)"
+      echo "Workspace: $(TF_WORKSPACE)"
+      echo "Run ID: ${{ parameters.runId }}"
+      
+      ${{ if eq(parameters.runType, 'speculative') }}:
+      echo "PR Number: $(System.PullRequest.PullRequestNumber)"
+      
+      echo "View details: https://app.terraform.io/app/$(TF_CLOUD_ORGANIZATION)/workspaces/$(TF_WORKSPACE)/runs/${{ parameters.runId }}"
+      echo "================================="
+    displayName: '${{ parameters.runType }} Summary'
+    condition: always()

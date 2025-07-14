@@ -1,0 +1,36 @@
+# Reusable task template to upload Terraform configuration to HCP Terraform
+# Equivalent to hashicorp/tfc-workflows-github/actions/upload-configuration
+
+parameters:
+  - name: speculative
+    type: boolean
+    default: false
+
+steps:
+  - script: |
+      echo "Uploading Terraform configuration to HCP Terraform..."
+      echo "Speculative: ${{ parameters.speculative }}"
+      echo "Workspace: $(TF_WORKSPACE)"
+      echo "Directory: $(CONFIG_DIRECTORY)"
+      
+      SPECULATIVE_FLAG=""
+      ${{ if eq(parameters.speculative, true) }}:
+      SPECULATIVE_FLAG="--speculative=true"
+      
+      docker run --rm \
+        -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+        -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+        -e "TF_LOG=$(TF_LOG)" \
+        -e "TF_MAX_TIMEOUT=$(TF_MAX_TIMEOUT)" \
+        -e "CI=true" \
+        -e "AZURE_DEVOPS=true" \
+        -e "BUILD_BUILDID=$(Build.BuildId)" \
+        -e "BUILD_SOURCEVERSION=$(Build.SourceVersion)" \
+        -e "BUILD_REQUESTEDFOR=$(Build.RequestedFor)" \
+        --workdir "/tfci/workspace" \
+        -v "$(Build.SourcesDirectory)/$(CONFIG_DIRECTORY):/tfci/workspace" \
+        hashicorp/tfci:latest \
+        tfci upload --workspace="$(TF_WORKSPACE)" --directory=./ $SPECULATIVE_FLAG
+    displayName: 'Upload Configuration'
+    env:
+      TF_API_TOKEN: $(TF_API_TOKEN)

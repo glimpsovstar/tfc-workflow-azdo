@@ -1,0 +1,28 @@
+# Reusable task template to display pipeline information
+# Equivalent to the informational steps in GitHub Actions
+
+parameters:
+  - name: pipelineType
+    type: string
+    values:
+      - speculative
+      - apply
+
+steps:
+  - script: |
+      echo "=== HCP Terraform Pipeline Info ==="
+      echo "Pipeline Type: ${{ parameters.pipelineType }}"
+      echo "Build ID: $(Build.BuildId)"
+      echo "Source Version: $(Build.SourceVersion)"
+      echo "Triggered by: $(Build.RequestedFor)"
+      
+      ${{ if eq(parameters.pipelineType, 'speculative') }}:
+      echo "PR Number: $(System.PullRequest.PullRequestNumber)"
+      echo "Source Branch: $(System.PullRequest.SourceBranch)"
+      echo "Target Branch: $(System.PullRequest.TargetBranch)"
+      
+      echo "Workspace: $(TF_WORKSPACE)"
+      echo "Organization: $(TF_CLOUD_ORGANIZATION)"  
+      echo "Config Directory: $(CONFIG_DIRECTORY)"
+      echo "================================="
+    displayName: 'Display Pipeline Info'

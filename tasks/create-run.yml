@@ -1,0 +1,51 @@
+# Reusable task template to create a run in HCP Terraform
+# Equivalent to hashicorp/tfc-workflows-github/actions/create-run
+
+parameters:
+  - name: planOnly
+    type: boolean
+    default: true
+  - name: message
+    type: string
+    default: 'Run from Azure DevOps'
+
+steps:
+  - script: |
+      echo "Creating Terraform run..."
+      echo "Plan Only: ${{ parameters.planOnly }}"
+      echo "Message: ${{ parameters.message }}"
+      
+      set +e  # Don't exit on error
+      
+      PLAN_ONLY_FLAG=""
+      ${{ if eq(parameters.planOnly, true) }}:
+      PLAN_ONLY_FLAG="--plan-only=true"
+      
+      RESULT=$(docker run --rm \
+        -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+        -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+        -e "TF_LOG=$(TF_LOG)" \
+        -e "TF_MAX_TIMEOUT=$(TF_MAX_TIMEOUT)" \
+        -e "CI=true" \
+        -e "AZURE_DEVOPS=true" \
+        -e "BUILD_BUILDID=$(Build.BuildId)" \
+        -e "BUILD_SOURCEVERSION=$(Build.SourceVersion)" \
+        -e "BUILD_REQUESTEDFOR=$(Build.RequestedFor)" \
+        hashicorp/tfci:latest \
+        tfci run create --workspace="$(TF_WORKSPACE)" $PLAN_ONLY_FLAG --message="${{ parameters.message }}" 2>&1)
+      
+      echo "$RESULT"
+      
+      # Extract run ID
+      RUN_ID=$(echo "$RESULT" | grep -o '"id":"[^"]*"' | cut -d'"' -f4 | head -1)
+      if [ ! -z "$RUN_ID" ]; then
+        echo "##vso[task.setvariable variable=RUN_ID;isOutput=true]$RUN_ID"
+        echo "Run ID: $RUN_ID"
+      else
+        echo "Failed to extract Run ID"
+        exit 1
+      fi
+    displayName: 'Create Run'
+    name: 'create_run'
+    env:
+      TF_API_TOKEN: $(TF_API_TOKEN)

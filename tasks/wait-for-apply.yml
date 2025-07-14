@@ -1,0 +1,45 @@
+# Reusable task template to wait for apply completion
+
+parameters:
+  - name: runId
+    type: string
+
+steps:
+  - script: |
+      echo "Waiting for apply ${{ parameters.runId }} to complete..."
+      
+      # Wait for the apply to complete
+      timeout=900  # 15 minutes
+      elapsed=0
+      interval=20
+      
+      while [ $elapsed -lt $timeout ]; do
+        STATUS=$(docker run --rm \
+          -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+          -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+          -e "TF_LOG=ERROR" \
+          hashicorp/tfci:latest \
+          tfci run show --run="${{ parameters.runId }}" --format=json 2>/dev/null | \
+          jq -r '.data.attributes.status' 2>/dev/null || echo "unknown")
+        
+        echo "Apply status: $STATUS (elapsed: ${elapsed}s)"
+        
+        if [ "$STATUS" = "applied" ] || [ "$STATUS" = "errored" ] || [ "$STATUS" = "canceled" ]; then
+          break
+        fi
+        
+        sleep $interval
+        elapsed=$((elapsed + interval))
+      done
+      
+      # Show final status
+      echo "=== Final Apply Status ==="
+      docker run --rm \
+        -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+        -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+        -e "TF_LOG=$(TF_LOG)" \
+        hashicorp/tfci:latest \
+        tfci run show --run="${{ parameters.runId }}"
+    displayName: 'Wait for Apply to Complete'
+    env:
+      TF_API_TOKEN: $(TF_API_TOKEN)

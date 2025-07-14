@@ -1,0 +1,25 @@
+# Reusable task template to apply a run in HCP Terraform
+# Equivalent to hashicorp/tfc-workflows-github/actions/apply-run
+
+parameters:
+  - name: runId
+    type: string
+  - name: comment
+    type: string
+    default: 'Applied from Azure DevOps'
+
+steps:
+  - script: |
+      echo "Applying Terraform run: ${{ parameters.runId }}"
+      echo "Comment: ${{ parameters.comment }}"
+      
+      docker run --rm \
+        -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+        -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+        -e "TF_LOG=$(TF_LOG)" \
+        -e "TF_MAX_TIMEOUT=$(TF_MAX_TIMEOUT)" \
+        hashicorp/tfci:latest \
+        tfci run apply --run="${{ parameters.runId }}" --comment="${{ parameters.comment }} - Pipeline $(Build.BuildId)"
+    displayName: 'Apply Terraform Run'
+    env:
+      TF_API_TOKEN: $(TF_API_TOKEN)

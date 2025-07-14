@@ -1,0 +1,43 @@
+# Reusable task template to get plan output from HCP Terraform
+# Equivalent to hashicorp/tfc-workflows-github/actions/plan-output
+
+steps:
+  - script: |
+      echo "Waiting for run $(create_run.RUN_ID) to complete..."
+      
+      # Wait for the run to complete
+      timeout=300  # 5 minutes
+      elapsed=0
+      interval=10
+      
+      while [ $elapsed -lt $timeout ]; do
+        STATUS=$(docker run --rm \
+          -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+          -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+          -e "TF_LOG=ERROR" \
+          hashicorp/tfci:latest \
+          tfci run show --run="$(create_run.RUN_ID)" --format=json 2>/dev/null | \
+          jq -r '.data.attributes.status' 2>/dev/null || echo "unknown")
+        
+        echo "Run status: $STATUS (elapsed: ${elapsed}s)"
+        
+        if [ "$STATUS" = "planned" ] || [ "$STATUS" = "errored" ] || [ "$STATUS" = "canceled" ]; then
+          break
+        fi
+        
+        sleep $interval
+        elapsed=$((elapsed + interval))
+      done
+      
+      # Get final run details
+      echo "=== Plan Output ==="
+      docker run --rm \
+        -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+        -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+        -e "TF_LOG=$(TF_LOG)" \
+        hashicorp/tfci:latest \
+        tfci run show --run="$(create_run.RUN_ID)"
+    displayName: 'Get Plan Output'
+    env:
+      TF_API_TOKEN: $(TF_API_TOKEN)
+    condition: and(succeeded(), ne(variables['create_run.RUN_ID'], ''))

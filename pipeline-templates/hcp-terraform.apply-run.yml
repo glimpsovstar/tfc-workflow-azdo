@@ -1,0 +1,92 @@
+# Azure DevOps Pipeline Template for HCP Terraform Apply Run (Main Branch)
+# This is the Azure DevOps equivalent of hashicorp/tfc-workflows-github workflow templates
+#
+# Usage: Copy this file to your repository and customize the variables section
+
+name: 'HCP-Terraform-Apply-$(Date:yyyyMMdd)-$(Rev:r)'
+
+# Trigger configuration
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - terraform/**
+      - '**/*.tf'
+
+# No PR trigger for apply pipeline
+pr: none
+
+# Variables - REQUIRED: Replace these with your values
+variables:
+  - group: 'terraform-variables'  # Create this variable group in Azure DevOps Library
+  # Required variables in the terraform-variables group:
+  # - TF_API_TOKEN (secret) - Your HCP Terraform API token
+  # - TF_CLOUD_ORGANIZATION - Your HCP Terraform organization name
+  # - TF_WORKSPACE - Your HCP Terraform workspace name
+  # - CONFIG_DIRECTORY - Directory containing Terraform configuration (default: "terraform")
+  
+  # Optional variables
+  - name: TF_LOG
+    value: 'INFO'  # Set to DEBUG for troubleshooting
+  - name: TF_MAX_TIMEOUT
+    value: '30m'   # Maximum timeout for operations
+
+# Agent pool
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+  - stage: TerraformPlan
+    displayName: 'Terraform Plan'
+    jobs:
+      - job: PlanTerraform
+        displayName: 'Plan Terraform Changes'
+        steps:
+          - checkout: self
+            displayName: 'Checkout source code'
+
+          - template: ../tasks/display-info.yml
+            parameters:
+              pipelineType: 'apply'
+
+          - template: ../tasks/upload-configuration.yml
+            parameters:
+              speculative: false
+
+          - template: ../tasks/create-run.yml
+            parameters:
+              planOnly: false
+              message: 'Apply run from Azure DevOps - $(Build.SourceVersion)'
+
+          - template: ../tasks/wait-for-plan.yml
+
+  - stage: TerraformApply
+    displayName: 'Terraform Apply'
+    dependsOn: TerraformPlan
+    condition: and(succeeded(), eq(dependencies.TerraformPlan.outputs['PlanTerraform.plan_status.STATUS'], 'planned'), eq(dependencies.TerraformPlan.outputs['PlanTerraform.plan_status.IS_CONFIRMABLE'], 'true'))
+    variables:
+      RUN_ID: $[ stageDependencies.TerraformPlan.PlanTerraform.outputs['create_run.RUN_ID'] ]
+    jobs:
+      - deployment: ApplyTerraform
+        displayName: 'Apply Terraform Changes'
+        environment: 'production'  # Create this environment in Azure DevOps
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none
+
+                - template: ../tasks/apply-run.yml
+                  parameters:
+                    runId: $(RUN_ID)
+
+                - template: ../tasks/wait-for-apply.yml
+                  parameters:
+                    runId: $(RUN_ID)
+
+                - template: ../tasks/run-summary.yml
+                  parameters:
+                    runType: 'apply'
+                    runId: $(RUN_ID)

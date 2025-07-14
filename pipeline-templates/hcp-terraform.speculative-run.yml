@@ -1,0 +1,69 @@
+# Azure DevOps Pipeline Template for HCP Terraform Speculative Run (Pull Request)
+# This is the Azure DevOps equivalent of hashicorp/tfc-workflows-github workflow templates
+# 
+# Usage: Copy this file to your repository and customize the variables section
+
+name: 'HCP-Terraform-PR-$(Date:yyyyMMdd)-$(Rev:r)'
+
+# Trigger configuration
+trigger: none  # Don't trigger on pushes
+
+# Pull Request trigger
+pr:
+  branches:
+    include:
+      - main
+      - develop
+      - feature/*
+  paths:
+    include:
+      - terraform/**
+      - '**/*.tf'
+
+# Variables - REQUIRED: Replace these with your values
+variables:
+  - group: 'terraform-variables'  # Create this variable group in Azure DevOps Library
+  # Required variables in the terraform-variables group:
+  # - TF_API_TOKEN (secret) - Your HCP Terraform API token
+  # - TF_CLOUD_ORGANIZATION - Your HCP Terraform organization name  
+  # - TF_WORKSPACE - Your HCP Terraform workspace name
+  # - CONFIG_DIRECTORY - Directory containing Terraform configuration (default: "terraform")
+  
+  # Optional variables
+  - name: TF_LOG
+    value: 'INFO'  # Set to DEBUG for troubleshooting
+  - name: TF_MAX_TIMEOUT
+    value: '30m'   # Maximum timeout for operations
+
+# Agent pool
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+  - stage: TerraformSpeculativeRun
+    displayName: 'Terraform Speculative Run'
+    jobs:
+      - job: SpeculativeRun
+        displayName: 'Run Terraform Plan (Speculative)'
+        steps:
+          - checkout: self
+            displayName: 'Checkout source code'
+
+          - template: ../tasks/display-info.yml
+            parameters:
+              pipelineType: 'speculative'
+
+          - template: ../tasks/upload-configuration.yml
+            parameters:
+              speculative: true
+
+          - template: ../tasks/create-run.yml
+            parameters:
+              planOnly: true
+              message: 'Speculative run from Azure DevOps PR $(System.PullRequest.PullRequestNumber)'
+
+          - template: ../tasks/plan-output.yml
+
+          - template: ../tasks/run-summary.yml
+            parameters:
+              runType: 'speculative'

@@ -1,0 +1,50 @@
+# Reusable task template to wait for plan completion
+# Used in apply pipelines to wait before proceeding to apply stage
+
+steps:
+  - script: |
+      echo "Waiting for plan $(create_run.RUN_ID) to complete..."
+      
+      # Wait for the plan to complete
+      timeout=600  # 10 minutes
+      elapsed=0
+      interval=15
+      
+      while [ $elapsed -lt $timeout ]; do
+        RUN_DETAILS=$(docker run --rm \
+          -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+          -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+          -e "TF_LOG=ERROR" \
+          hashicorp/tfci:latest \
+          tfci run show --run="$(create_run.RUN_ID)" --format=json 2>/dev/null)
+        
+        STATUS=$(echo "$RUN_DETAILS" | jq -r '.data.attributes.status' 2>/dev/null || echo "unknown")
+        IS_CONFIRMABLE=$(echo "$RUN_DETAILS" | jq -r '.data.attributes.actions.IsConfirmable' 2>/dev/null || echo "false")
+        
+        echo "Run status: $STATUS, Confirmable: $IS_CONFIRMABLE (elapsed: ${elapsed}s)"
+        
+        # Set output variables
+        echo "##vso[task.setvariable variable=STATUS;isOutput=true]$STATUS"
+        echo "##vso[task.setvariable variable=IS_CONFIRMABLE;isOutput=true]$IS_CONFIRMABLE"
+        
+        if [ "$STATUS" = "planned" ] || [ "$STATUS" = "errored" ] || [ "$STATUS" = "canceled" ]; then
+          break
+        fi
+        
+        sleep $interval
+        elapsed=$((elapsed + interval))
+      done
+      
+      # Display plan details
+      echo "=== Plan Details ==="
+      docker run --rm \
+        -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+        -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+        -e "TF_LOG=$(TF_LOG)" \
+        hashicorp/tfci:latest \
+        tfci run show --run="$(create_run.RUN_ID)"
+    displayName: 'Wait for Plan to Complete'
+    name: 'plan_status'
+    env:
+      TF_API_TOKEN: $(TF_API_TOKEN)
+    condition: and(succeeded(), ne(variables['create_run.RUN_ID'], ''))
