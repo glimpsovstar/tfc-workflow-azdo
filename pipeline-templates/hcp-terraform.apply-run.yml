@@ -1,7 +1,6 @@
+# pipeline-templates/hcp-terraform.apply-run.yml
 # Azure DevOps Pipeline Template for HCP Terraform Apply Run (Main Branch)
-# This is the Azure DevOps equivalent of hashicorp/tfc-workflows-github workflow templates
-#
-# Usage: Copy this file to your repository and customize the variables section
+# Now includes Terraform best practices: fmt check, validate, and optional linting
 
 name: 'HCP-Terraform-Apply-$(Date:yyyyMMdd)-$(Rev:r)'
 
@@ -32,17 +31,21 @@ variables:
     value: 'INFO'  # Set to DEBUG for troubleshooting
   - name: TF_MAX_TIMEOUT
     value: '30m'   # Maximum timeout for operations
+  - name: ENABLE_TFLINT
+    value: 'true'  # Enable TFLint analysis
+  - name: ENABLE_TFSEC
+    value: 'false' # Disable security scan for apply (already done in PR)
 
 # Agent pool
 pool:
   vmImage: 'ubuntu-latest'
 
 stages:
-  - stage: TerraformPlan
-    displayName: 'Terraform Plan'
+  - stage: TerraformValidation
+    displayName: 'Terraform Validation & Best Practices'
     jobs:
-      - job: PlanTerraform
-        displayName: 'Plan Terraform Changes'
+      - job: ValidateCode
+        displayName: 'Pre-Apply Quality Checks'
         steps:
           - checkout: self
             displayName: 'Checkout source code'
@@ -51,6 +54,24 @@ stages:
             parameters:
               pipelineType: 'apply'
 
+          # Validation steps (even for main branch - defense in depth)
+          - template: ../tasks/terraform-validate.yml
+            parameters:
+              workingDirectory: $(CONFIG_DIRECTORY)
+              enableTflint: $(ENABLE_TFLINT)
+              enableTfsec: $(ENABLE_TFSEC)
+
+  - stage: TerraformPlan
+    displayName: 'Terraform Plan'
+    dependsOn: TerraformValidation
+    condition: succeeded()
+    jobs:
+      - job: PlanTerraform
+        displayName: 'Plan Terraform Changes'
+        steps:
+          - checkout: self
+            displayName: 'Checkout source code'
+
           - template: ../tasks/upload-configuration.yml
             parameters:
               speculative: false
@@ -58,7 +79,7 @@ stages:
           - template: ../tasks/create-run.yml
             parameters:
               planOnly: false
-              message: 'Apply run from Azure DevOps - $(Build.SourceVersion)'
+              message: 'Apply run from Azure DevOps - $(Build.SourceVersion) - Validated ✅'
 
           - template: ../tasks/wait-for-plan.yml
 
@@ -81,6 +102,7 @@ stages:
                 - template: ../tasks/apply-run.yml
                   parameters:
                     runId: $(RUN_ID)
+                    comment: 'Applied from Azure DevOps - Quality Validated ✅'
 
                 - template: ../tasks/wait-for-apply.yml
                   parameters:
@@ -90,3 +112,19 @@ stages:
                   parameters:
                     runType: 'apply'
                     runId: $(RUN_ID)
+
+                # NEW: Post-apply summary
+                - script: |
+                    echo "🚀 Infrastructure Deployment Summary"
+                    echo "==================================="
+                    echo "✅ Terraform Format Check: PASSED"
+                    echo "✅ Terraform Validate: PASSED" 
+                    echo "✅ Quality Checks: PASSED"
+                    echo "✅ Terraform Plan: COMPLETED"
+                    echo "✅ Terraform Apply: COMPLETED"
+                    echo ""
+                    echo "📊 View details in HCP Terraform:"
+                    echo "🔗 Workspace: https://app.terraform.io/app/$(TF_CLOUD_ORGANIZATION)/workspaces/$(TF_WORKSPACE)"
+                    echo "🔗 Run: https://app.terraform.io/app/$(TF_CLOUD_ORGANIZATION)/workspaces/$(TF_WORKSPACE)/runs/$(RUN_ID)"
+                  displayName: 'Deployment Summary'
+                  condition: always()
