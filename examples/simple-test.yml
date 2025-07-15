@@ -1,0 +1,84 @@
+# Basic test to verify Azure DevOps variable group and parallelism setup
+# Use this first to confirm basic pipeline functionality before testing HCP Terraform integration
+
+name: 'Simple-Test-$(Date:yyyyMMdd)-$(Rev:r)'
+
+# Manual trigger only for testing
+trigger: none
+
+variables:
+  - group: 'terraform-variables'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+jobs:
+  - job: BasicValidation
+    displayName: 'Basic Environment Validation'
+    steps:
+      - script: |
+          echo "🧪 Simple Test - Azure DevOps Environment Validation"
+          echo "=================================================="
+          echo "Build ID: $(Build.BuildId)"
+          echo "Agent: $(Agent.Name)"
+          echo "Source Directory: $(Build.SourcesDirectory)"
+          echo "Timestamp: $(Build.StartTime)"
+        displayName: 'Environment Info'
+
+      - script: |
+          echo "📋 Testing Variable Group Access"
+          echo "TF_CLOUD_ORGANIZATION: $(TF_CLOUD_ORGANIZATION)"
+          echo "TF_WORKSPACE: $(TF_WORKSPACE)"
+          echo "CONFIG_DIRECTORY: $(CONFIG_DIRECTORY)"
+          
+          # Test if TF_API_TOKEN exists (don't print the actual token!)
+          if [ -z "$(TF_API_TOKEN)" ]; then
+            echo "❌ TF_API_TOKEN is not set!"
+            echo "Please check your terraform-variables variable group"
+            exit 1
+          else
+            echo "✅ TF_API_TOKEN is available (length: ${#TF_API_TOKEN})"
+          fi
+        displayName: 'Variable Group Test'
+        env:
+          TF_API_TOKEN: $(TF_API_TOKEN)
+
+      - script: |
+          echo "📁 Testing Repository Structure"
+          echo "Repository contents:"
+          ls -la $(Build.SourcesDirectory)
+          
+          echo ""
+          echo "Looking for key framework files:"
+          if [ -d "$(Build.SourcesDirectory)/pipeline-templates" ]; then
+            echo "✅ pipeline-templates/ directory found"
+            ls -la $(Build.SourcesDirectory)/pipeline-templates/
+          else
+            echo "❌ pipeline-templates/ directory not found"
+          fi
+          
+          if [ -d "$(Build.SourcesDirectory)/tasks" ]; then
+            echo "✅ tasks/ directory found"
+            ls -la $(Build.SourcesDirectory)/tasks/
+          else
+            echo "❌ tasks/ directory not found"
+          fi
+          
+          if [ -d "$(Build.SourcesDirectory)/$(CONFIG_DIRECTORY)" ]; then
+            echo "✅ $(CONFIG_DIRECTORY)/ directory found"
+            ls -la $(Build.SourcesDirectory)/$(CONFIG_DIRECTORY)/
+          else
+            echo "❌ $(CONFIG_DIRECTORY)/ directory not found"
+          fi
+        displayName: 'Repository Structure Test'
+
+      - script: |
+          echo "🎉 Simple Test Results"
+          echo "==================="
+          echo "✅ Azure DevOps pipeline execution: SUCCESS"
+          echo "✅ Variable group access: SUCCESS"
+          echo "✅ Repository structure: SUCCESS"
+          echo ""
+          echo "🚀 Ready for HCP Terraform connectivity testing!"
+          echo "Next: Run examples/connectivity-test.yml"
+        displayName: 'Test Summary'

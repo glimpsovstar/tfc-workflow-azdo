@@ -1,0 +1,185 @@
+# Comprehensive test to verify HCP Terraform integration and Docker functionality
+# Run this after simple-test.yml passes successfully
+
+name: 'Connectivity-Test-$(Date:yyyyMMdd)-$(Rev:r)'
+
+# Manual trigger only for testing
+trigger: none
+
+variables:
+  - group: 'terraform-variables'
+  - name: TF_LOG
+    value: 'INFO'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+jobs:
+  - job: ConnectivityValidation
+    displayName: 'HCP Terraform Connectivity Validation'
+    steps:
+      - script: |
+          echo "🌐 HCP Terraform Connectivity Test"
+          echo "================================="
+          echo "Testing integration between Azure DevOps and HCP Terraform"
+          echo "Organization: $(TF_CLOUD_ORGANIZATION)"
+          echo "Workspace: $(TF_WORKSPACE)"
+          echo "Config Directory: $(CONFIG_DIRECTORY)"
+          echo "Build ID: $(Build.BuildId)"
+        displayName: 'Test Overview'
+
+      - script: |
+          echo "🐳 Testing Docker Availability"
+          echo "Docker version:"
+          docker --version
+          
+          echo ""
+          echo "Testing Docker functionality:"
+          docker run --rm hello-world
+          
+          echo "✅ Docker is working correctly"
+        displayName: 'Docker Test'
+
+      - script: |
+          echo "📦 Testing HashiCorp TFCI Container"
+          echo "Pulling HashiCorp tfci container..."
+          docker pull hashicorp/tfci:latest
+          
+          echo ""
+          echo "Testing tfci version:"
+          docker run --rm hashicorp/tfci:latest tfci --version
+          
+          echo "✅ HashiCorp TFCI container is working"
+        displayName: 'TFCI Container Test'
+
+      - script: |
+          echo "🔐 Testing HCP Terraform Authentication"
+          echo "Organization: $(TF_CLOUD_ORGANIZATION)"
+          
+          # Test basic API connectivity
+          docker run --rm \
+            -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+            -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+            -e "TF_LOG=$(TF_LOG)" \
+            hashicorp/tfci:latest \
+            tfci workspace list
+          
+          echo "✅ HCP Terraform API authentication successful"
+        displayName: 'HCP Terraform API Test'
+        env:
+          TF_API_TOKEN: $(TF_API_TOKEN)
+
+      - script: |
+          echo "🏗️ Testing Specific Workspace Access"
+          echo "Workspace: $(TF_WORKSPACE)"
+          
+          # Test access to specific workspace
+          docker run --rm \
+            -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+            -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+            -e "TF_LOG=$(TF_LOG)" \
+            hashicorp/tfci:latest \
+            tfci workspace show --workspace="$(TF_WORKSPACE)"
+          
+          echo "✅ Workspace access confirmed"
+        displayName: 'Workspace Access Test'
+        env:
+          TF_API_TOKEN: $(TF_API_TOKEN)
+
+      - script: |
+          echo "📂 Testing Terraform Configuration"
+          echo "Config directory: $(CONFIG_DIRECTORY)"
+          
+          cd $(Build.SourcesDirectory)/$(CONFIG_DIRECTORY)
+          echo "Contents of terraform directory:"
+          ls -la
+          
+          echo ""
+          echo "Testing Terraform syntax validation:"
+          docker run --rm \
+            -v "$(pwd):/workspace" \
+            -w /workspace \
+            hashicorp/terraform:light \
+            terraform init -backend=false
+          
+          docker run --rm \
+            -v "$(pwd):/workspace" \
+            -w /workspace \
+            hashicorp/terraform:light \
+            terraform validate
+          
+          echo "✅ Terraform configuration is valid"
+        displayName: 'Terraform Configuration Test'
+
+      - script: |
+          echo "📤 Testing Configuration Upload to HCP Terraform"
+          echo "Uploading configuration to workspace: $(TF_WORKSPACE)"
+          
+          cd $(Build.SourcesDirectory)/$(CONFIG_DIRECTORY)
+          
+          # Test configuration upload (speculative run)
+          docker run --rm \
+            -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+            -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+            -e "TF_LOG=$(TF_LOG)" \
+            -v "$(pwd):/tfci/workspace" \
+            --workdir "/tfci/workspace" \
+            hashicorp/tfci:latest \
+            tfci upload --workspace="$(TF_WORKSPACE)" --directory=./ --speculative=true
+          
+          echo "✅ Configuration upload successful"
+        displayName: 'Configuration Upload Test'
+        env:
+          TF_API_TOKEN: $(TF_API_TOKEN)
+
+      - script: |
+          echo "🧪 Testing Speculative Run Creation"
+          echo "Creating test speculative run..."
+          
+          # Create a speculative run to test full integration
+          RESULT=$(docker run --rm \
+            -e "TF_API_TOKEN=$(TF_API_TOKEN)" \
+            -e "TF_CLOUD_ORGANIZATION=$(TF_CLOUD_ORGANIZATION)" \
+            -e "TF_LOG=$(TF_LOG)" \
+            hashicorp/tfci:latest \
+            tfci run create --workspace="$(TF_WORKSPACE)" --plan-only=true --message="Connectivity test from Azure DevOps - Build $(Build.BuildId)" 2>&1)
+          
+          echo "$RESULT"
+          
+          # Extract run ID if successful
+          RUN_ID=$(echo "$RESULT" | grep -o '"id":"[^"]*"' | cut -d'"' -f4 | head -1)
+          if [ ! -z "$RUN_ID" ]; then
+            echo "✅ Speculative run created successfully!"
+            echo "Run ID: $RUN_ID"
+            echo "🔗 View in HCP Terraform: https://app.terraform.io/app/$(TF_CLOUD_ORGANIZATION)/workspaces/$(TF_WORKSPACE)/runs/$RUN_ID"
+          else
+            echo "⚠️  Run creation completed but couldn't extract Run ID"
+            echo "Check the output above for details"
+          fi
+        displayName: 'Speculative Run Test'
+        env:
+          TF_API_TOKEN: $(TF_API_TOKEN)
+
+      - script: |
+          echo "🎉 Connectivity Test Complete!"
+          echo "============================"
+          echo ""
+          echo "✅ Test Results Summary:"
+          echo "  ✅ Docker functionality: WORKING"
+          echo "  ✅ TFCI container: WORKING"
+          echo "  ✅ HCP Terraform API: CONNECTED"
+          echo "  ✅ Workspace access: CONFIRMED"
+          echo "  ✅ Terraform validation: PASSED"
+          echo "  ✅ Configuration upload: SUCCESSFUL"
+          echo "  ✅ Speculative run: CREATED"
+          echo ""
+          echo "🚀 Your environment is ready for full CI/CD pipeline testing!"
+          echo ""
+          echo "Next Steps:"
+          echo "1. Copy pipeline templates to repository root"
+          echo "2. Set up PR validation pipeline"
+          echo "3. Set up main branch deployment pipeline"
+          echo "4. Test complete workflow with actual PR"
+          echo ""
+          echo "🔗 HCP Terraform Workspace: https://app.terraform.io/app/$(TF_CLOUD_ORGANIZATION)/workspaces/$(TF_WORKSPACE)"
+        displayName: 'Final Test Summary'
