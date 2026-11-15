@@ -12,10 +12,14 @@
 #   - Root does the setup and the supervision. The agent and every job run as
 #     UID 1001 (user azp) through setpriv: empty bounding set, no_new_privs.
 #   - The CA bundle is root-owned and read-only, outside /azp.
-#   - run.sh --once: one job, then the container exits (the registration is
-#     kept so the pool is never empty; it is removed when the pod stops).
-#     The kubelet restarts the container and the agent directory is wiped,
-#     so each job gets a re-registered agent and a clean work directory.
+#   - The agent package is downloaded once per container start into a
+#     root-owned cache, /opt/azp-cache.
+#   - One job per registration, in a loop inside the pod: wipe the agent
+#     directory, extract from the cache, configure, run.sh --once, kill every
+#     UID 1001 process, deregister through the REST API, repeat. The agent's
+#     credential, which jobs can read, dies with the registration seconds
+#     after each job. The Deployment runs two replicas so the pool is never
+#     empty while one of them re-registers.
 #   - Otherwise as Microsoft's: the token is never echoed, VSO_AGENT_IGNORE is
 #     set, and a trap removes the agent on exit with retries.
 apiVersion: v1
@@ -39,7 +43,17 @@ data:
     SECRET_DIR=/etc/azp-secret
     CA_DIR=/etc/azp-ca
     CA_BUNDLE="${CA_DIR}/bundle.pem"
+    CACHE_DIR=/opt/azp-cache
+    AGENT_TARBALL="${CACHE_DIR}/agent.tar.gz"
+    # Created after the first successful config. The readiness probe checks
+    # it, so a rolling update waits until the new pod has an agent online.
+    READY_FILE=/run/azp-ready
+    # Consecutive failed cycles (config, run or deregistration) before the
+    # container gives up and exits 1. Each failure backs off 10 seconds.
+    MAX_FAILURES=5
+    BACKOFF_SECONDS=10
     AGENT_PID=""
+    REGISTERED=0
 
     print_header() {
       local lightcyan="\033[1;36m"
@@ -93,26 +107,26 @@ data:
     # no child process inherits it and UID 1001 cannot read it.
     AZP_URL="$(< "${SECRET_DIR}/url")"
     AZP_POOL="$(< "${SECRET_DIR}/pool")"
+    AZP_POOL="${AZP_POOL:-Default}"
     TOKEN="$(< "${SECRET_DIR}/token")"
     if [ -z "${AZP_URL}" ] || [ -z "${TOKEN}" ]; then
       echo 1>&2 "error: ${SECRET_DIR} must hold non-empty url and token files"
       exit 1
     fi
 
-    # Remove the agent registration from the pool. Runs in this root shell,
-    # which still holds TOKEN.
-    # Call the Azure DevOps REST API with the PAT on stdin (curl config), never in argv.
+    # Call the Azure DevOps REST API with the PAT on stdin (curl config),
+    # never in argv. Runs in this root shell, which holds TOKEN.
     azp_api() {
-      printf 'user = "user:%s"\n' "${TOKEN}" | curl --fail -sS -K - -X "$1" -H "Accept: application/json" "$2"
+      printf 'user = "user:%s"\n' "${TOKEN}" | curl --fail -sS -K - \
+        --connect-timeout 10 --max-time 30 \
+        -X "$1" -H "Accept: application/json" "$2"
     }
 
     AGENT_NAME="${AZP_AGENT_NAME:-$(hostname)}"
 
-    cleanup() {
-      trap "" EXIT INT TERM
-
-      # Stop the agent if it is still running (pod deleted mid-job), giving
-      # it up to 60 seconds to cancel the job and exit.
+    # Stop the agent if it is still running (pod deleted mid-job), giving it
+    # up to 60 seconds to cancel the job and exit.
+    stop_agent() {
       if [ -n "${AGENT_PID}" ] && kill -0 "${AGENT_PID}" 2>/dev/null; then
         kill -INT "${AGENT_PID}" 2>/dev/null || true
         for _ in $(seq 1 60); do
@@ -120,37 +134,36 @@ data:
           sleep 1
         done
       fi
+    }
 
-      # Kill everything a job left behind as UID 1001, and keep killing until
-      # none remain, so no job process is alive while the token is in use.
+    # Kill everything a job left behind as UID 1001, and keep killing until
+    # none remain, so no job process is alive while the token is in use.
+    # Returns 1 if any survive.
+    kill_azp_processes() {
       for _ in $(seq 1 20); do
-        pgrep -u "${AZP_UID}" >/dev/null 2>&1 || break
+        pgrep -u "${AZP_UID}" >/dev/null 2>&1 || return 0
         pkill -KILL -u "${AZP_UID}" 2>/dev/null || true
         sleep 0.5
       done
       if pgrep -u "${AZP_UID}" >/dev/null 2>&1; then
-        echo 1>&2 "warning: UID ${AZP_UID} processes still running; not using the token. Remove agent ${AGENT_NAME} from the pool by hand."
-        return 0
+        return 1
       fi
+      return 0
+    }
 
-      # After a normal one-job exit, keep the registration: an empty pool makes
-      # Azure DevOps fail queued jobs at once ("No agent found in pool"). The
-      # restart wipes the agent directory and re-registers under the same name
-      # (--replace). Deregister only when the pod is stopped (INT or TERM).
-      if [ "${DEREGISTER}" != 1 ]; then
-        echo "Job done. Keeping agent ${AGENT_NAME} registered for the next job."
-        return 0
-      fi
-
-      # Deregister through the REST API from this root shell. No agent code runs
-      # here: files under ${AGENT_DIR} are writable by jobs and are not trusted,
-      # so the pool and agent IDs are looked up by name, and the PAT goes to curl
-      # on stdin. Docs: learn.microsoft.com/rest/api/azure/devops/distributedtask/agents (7.1).
-      print_header "Cleanup. Removing Azure Pipelines agent ${AGENT_NAME}..."
+    # Deregister through the REST API from this root shell. Call only after
+    # kill_azp_processes succeeded. No agent code runs here: files under
+    # ${AGENT_DIR} are writable by jobs and are not trusted, so the pool and
+    # agent IDs are looked up by name, and the PAT goes to curl on stdin.
+    # Docs: learn.microsoft.com/rest/api/azure/devops/distributedtask/agents (7.1).
+    # Arguments: attempts, seconds between attempts.
+    deregister() {
+      local attempts="$1" delay="$2"
       local pool_q agent_q pool_id agent_id attempt
+      print_header "Removing Azure Pipelines agent ${AGENT_NAME}..."
       pool_q="$(jq -rn --arg v "${AZP_POOL}" '$v|@uri')"
       agent_q="$(jq -rn --arg v "${AGENT_NAME}" '$v|@uri')"
-      for attempt in $(seq 1 10); do
+      for attempt in $(seq 1 "${attempts}"); do
         pool_id="$(azp_api GET "${AZP_URL}/_apis/distributedtask/pools?poolName=${pool_q}&api-version=7.1" | jq -r '.value[0].id // empty')" || pool_id=""
         if [ -n "${pool_id}" ]; then
           agent_id="$(azp_api GET "${AZP_URL}/_apis/distributedtask/pools/${pool_id}/agents?agentName=${agent_q}&api-version=7.1" | jq -r '.value[0].id // empty')" || agent_id=""
@@ -163,10 +176,28 @@ data:
             return 0
           fi
         fi
-        echo "Attempt ${attempt} failed. Retrying in 30 seconds..."
-        sleep 30
+        if [ "${attempt}" -lt "${attempts}" ]; then
+          echo "Attempt ${attempt} failed. Retrying in ${delay} seconds..."
+          sleep "${delay}"
+        fi
       done
-      echo 1>&2 "warning: failed to remove agent ${AGENT_NAME} after 10 attempts"
+      echo 1>&2 "warning: failed to remove agent ${AGENT_NAME} after ${attempts} attempts"
+      return 1
+    }
+
+    # On any exit (SIGTERM, SIGINT, too many failures, an unexpected error):
+    # stop the agent, kill UID 1001 processes, then deregister if registered.
+    on_exit() {
+      local rc=$?
+      trap "" EXIT INT TERM
+      print_header "Stopping (exit status ${rc})..."
+      stop_agent
+      if ! kill_azp_processes; then
+        echo 1>&2 "warning: UID ${AZP_UID} processes still running; not using the token. Remove agent ${AGENT_NAME} from the pool by hand."
+      elif [ "${REGISTERED}" = 1 ]; then
+        deregister 10 30 || true
+      fi
+      exit "${rc}"
     }
 
     print_header "3. Determining matching Azure Pipelines agent..."
@@ -184,53 +215,116 @@ data:
       exit 1
     fi
 
-    print_header "4. Downloading and extracting Azure Pipelines agent..."
+    print_header "4. Downloading the Azure Pipelines agent into ${CACHE_DIR}..."
 
-    # The /azp emptyDir survives a container restart, so wipe the agent and
-    # its _work directory: nothing a previous job wrote is kept.
-    chown root:root /azp
-    chmod 0755 /azp
-    rm -rf "${AGENT_DIR}"
-    install -d -o root -g root -m 0755 "${AGENT_DIR}"
-    curl -LsS "${AZP_AGENT_PACKAGE_LATEST_URL}" | tar -xz -C "${AGENT_DIR}"
-    mkdir -p "${AGENT_DIR}/_work"
-    # The agent writes its config, credentials and _diag here, so azp owns
-    # it. The CA bundle and the secret stay outside /azp.
-    chown -R azp:azp "${AGENT_DIR}"
-    cd "${AGENT_DIR}"
+    # Once per container start. Root-owned: the directory is 0755 and the
+    # tarball 0644, so UID 1001 can read it but not change what the next
+    # cycle extracts.
+    install -d -o root -g root -m 0755 "${CACHE_DIR}"
+    rm -f "${AGENT_TARBALL}" "${AGENT_TARBALL}.tmp"
+    curl -fLsS -o "${AGENT_TARBALL}.tmp" "${AZP_AGENT_PACKAGE_LATEST_URL}"
+    chown root:root "${AGENT_TARBALL}.tmp"
+    chmod 0644 "${AGENT_TARBALL}.tmp"
+    mv -f "${AGENT_TARBALL}.tmp" "${AGENT_TARBALL}"
 
     # Keep setup variables out of the agent's capabilities. No secret is in
     # the environment any more; this mirrors Microsoft's script.
     export VSO_AGENT_IGNORE="AZP_AGENT_NAME,TARGETARCH"
 
-    # Writes .env and .path for the agent from the current environment.
-    as_azp ./env.sh
+    # The /azp emptyDir survives a container restart and is wiped every
+    # cycle below.
+    chown root:root /azp
+    chmod 0755 /azp
 
-    DEREGISTER=0
-    trap "cleanup; exit 0" EXIT
-    trap "DEREGISTER=1; exit 130" INT
-    trap "DEREGISTER=1; exit 143" TERM
+    trap on_exit EXIT
+    trap "exit 130" INT
+    trap "exit 143" TERM
 
-    print_header "5. Configuring Azure Pipelines agent..."
+    failures=0
+    cycle=0
+    while true; do
+      cycle=$((cycle + 1))
+      ok=1
 
-    # The PAT is in config.sh's argv while it runs, as in Microsoft's script.
-    # No job is running yet, and /proc/<pid>/cmdline of this process is only
-    # visible inside the container.
-    as_azp ./config.sh --unattended \
-      --agent "${AGENT_NAME}" \
-      --url "${AZP_URL}" \
-      --auth PAT \
-      --token "${TOKEN}" \
-      --pool "${AZP_POOL:-Default}" \
-      --work "${AGENT_DIR}/_work" \
-      --replace \
-      --acceptTeeEula
+      print_header "5. Cycle ${cycle}: fresh agent from the cache..."
 
-    print_header "6. Running Azure Pipelines agent for one job..."
+      # Nothing a previous job wrote is kept: the agent, its config and
+      # credentials, _diag and _work all go.
+      cd /
+      rm -rf "${AGENT_DIR}"
+      install -d -o root -g root -m 0755 "${AGENT_DIR}"
+      tar -xzf "${AGENT_TARBALL}" -C "${AGENT_DIR}"
+      mkdir -p "${AGENT_DIR}/_work"
+      # The agent writes its config, credentials and _diag here, so azp owns
+      # it. The CA bundle, the cache and the secret stay outside /azp.
+      chown -R azp:azp "${AGENT_DIR}"
+      cd "${AGENT_DIR}"
 
-    # A child of this root shell, so TERM and INT reach the traps above.
-    # --once: take one job, then exit. The container exits 0 and the kubelet
-    # restarts it from step 1 (fresh agent directory, same registration).
-    as_azp ./run.sh --once &
-    AGENT_PID=$!
-    wait "${AGENT_PID}" || echo "agent exited with status $?"
+      # Writes .env and .path for the agent from the current environment.
+      as_azp ./env.sh
+
+      print_header "6. Cycle ${cycle}: configuring Azure Pipelines agent ${AGENT_NAME}..."
+
+      # The PAT is in config.sh's argv while it runs, as in Microsoft's
+      # script. No UID 1001 process from a job is alive (killed at the end of
+      # the last cycle), the agent code was just extracted from the
+      # root-owned cache, and /proc/<pid>/cmdline is only visible inside the
+      # container. REGISTERED is set first, so a stop during config still
+      # deregisters.
+      REGISTERED=1
+      if as_azp ./config.sh --unattended \
+        --agent "${AGENT_NAME}" \
+        --url "${AZP_URL}" \
+        --auth PAT \
+        --token "${TOKEN}" \
+        --pool "${AZP_POOL}" \
+        --work "${AGENT_DIR}/_work" \
+        --replace \
+        --acceptTeeEula; then
+        touch "${READY_FILE}"
+
+        print_header "7. Cycle ${cycle}: running the agent for one job..."
+
+        # A child of this root shell, so TERM and INT reach the traps above
+        # while it waits.
+        as_azp ./run.sh --once &
+        AGENT_PID=$!
+        rc=0
+        wait "${AGENT_PID}" || rc=$?
+        AGENT_PID=""
+        if [ "${rc}" -ne 0 ]; then
+          echo 1>&2 "warning: agent exited with status ${rc}"
+          ok=0
+        fi
+      else
+        echo 1>&2 "warning: config.sh failed"
+        ok=0
+      fi
+
+      print_header "8. Cycle ${cycle}: killing job processes and deregistering..."
+
+      # If a job process survives, do not use the token. Exit instead: the
+      # container's processes die with PID 1, and the restart registers again
+      # with --replace.
+      if ! kill_azp_processes; then
+        echo 1>&2 "error: UID ${AZP_UID} processes still running; exiting so the container restarts"
+        exit 1
+      fi
+      if deregister 5 5; then
+        REGISTERED=0
+      else
+        ok=0
+      fi
+
+      if [ "${ok}" = 1 ]; then
+        failures=0
+      else
+        failures=$((failures + 1))
+        if [ "${failures}" -ge "${MAX_FAILURES}" ]; then
+          echo 1>&2 "error: ${failures} failed cycles in a row; exiting"
+          exit 1
+        fi
+        echo "Cycle failed (${failures} of ${MAX_FAILURES} in a row). Backing off ${BACKOFF_SECONDS} seconds..."
+        sleep "${BACKOFF_SECONDS}"
+      fi
+    done

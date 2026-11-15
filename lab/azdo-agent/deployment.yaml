@@ -16,10 +16,20 @@ metadata:
     app.kubernetes.io/name: azdo-agent
     app.kubernetes.io/part-of: tfc-workflow-azdo
 spec:
-  replicas: 1
-  # One agent at a time: the old pod deregisters before the new one registers.
+  # Two agents keep the pool non-empty while one re-registers. Each agent
+  # deregisters after every job and registers again a few seconds later, and
+  # Azure DevOps fails queued jobs at once when the pool has no agent ("No
+  # agent found in pool ... which satisfies the specified demands").
+  replicas: 2
+  # Replace one pod at a time and never run a third: the other pod keeps an
+  # agent in the pool during a rollout. Recreate would stop both pods and
+  # empty the pool. The readiness probe below holds the rollout until the
+  # new pod's agent is configured.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: azdo-agent
@@ -32,8 +42,10 @@ spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
       # On SIGTERM start.sh gives a running job up to 60s to stop, then
-      # retries agent removal up to 10 times, 30s apart. Give it time.
-      terminationGracePeriodSeconds: 390
+      # retries agent removal up to 10 times, 30s apart. A SIGTERM that lands
+      # during a cycle's own removal waits for it to finish (about 30s at
+      # most). Give it time.
+      terminationGracePeriodSeconds: 420
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -73,11 +85,14 @@ spec:
           imagePullPolicy: IfNotPresent
           workingDir: /azp
           # start.sh runs as root and is PID 1. It installs packages, builds
-          # the CA bundle, then runs the agent and its jobs as UID 1001.
+          # the CA bundle, then loops: register, one job as UID 1001,
+          # deregister. The container does not exit between jobs.
           command: ["/bin/bash", "/opt/azp-start/start.sh"]
           # No secret is in the environment. URL, pool and PAT are files in
           # the azp-secret volume, readable only by root.
           env:
+            # The agent name is the pod name, so each replica registers
+            # under its own name.
             - name: AZP_AGENT_NAME
               valueFrom:
                 fieldRef:
@@ -115,6 +130,15 @@ spec:
               # UID 1001 agent and stray job processes at cleanup. All are in
               # the Pod Security baseline set. None reach UID 1001.
               add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID", "SETPCAP", "KILL"]
+          # Ready once the agent has been configured for the first time.
+          # start.sh creates the file as root; UID 1001 cannot write /run.
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/run/azp-ready"]
+            periodSeconds: 10
+            failureThreshold: 3
+          # Per pod. Two replicas request 500m CPU and 1Gi in total; the lab
+          # nodes have about 3.8 CPU and 15Gi allocatable each.
           resources:
             requests:
               cpu: 250m
