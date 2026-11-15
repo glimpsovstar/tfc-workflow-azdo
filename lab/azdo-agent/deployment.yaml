@@ -1,0 +1,182 @@
+# Lab Azure DevOps self-hosted agent, native mode (tfci on the PATH, no Docker).
+#
+# The pod only opens outbound connections: it polls Azure DevOps and calls TFE
+# at https://tfe.lab.internal inside the VNet. Nothing calls in, so there is
+# no Service and no Ingress.
+#
+# Needs, created by David before apply (see README.md):
+#   - Secret    azdo-agent  keys: url, pool, token
+#   - ConfigMap tfe-ca      key:  ca.pem (lab TFE CA)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: azdo-agent
+  namespace: azdo-agents
+  labels:
+    app.kubernetes.io/name: azdo-agent
+    app.kubernetes.io/part-of: tfc-workflow-azdo
+spec:
+  replicas: 1
+  # One agent at a time: the old pod deregisters before the new one registers.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: azdo-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: azdo-agent
+    spec:
+      # The agent never talks to the Kubernetes API.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # start.sh retries agent removal while a job finishes. Give it time.
+      terminationGracePeriodSeconds: 330
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+
+      initContainers:
+        # Copies the static tfci binary out of the pinned image into a shared
+        # emptyDir. Runs as non-root with a read-only root filesystem.
+        - name: tfci
+          image: hashicorp/tfci:v1.4.0
+          imagePullPolicy: IfNotPresent
+          command: ["cp", "/usr/local/bin/tfci", "/opt/tools/bin/tfci"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: tools-bin
+              mountPath: /opt/tools/bin
+
+      containers:
+        - name: agent
+          # Pinned by tag for the lab. Pin by digest for anything longer lived:
+          #   image: ubuntu:24.04@sha256:<digest>
+          image: ubuntu:24.04
+          imagePullPolicy: IfNotPresent
+          workingDir: /azp
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+
+              # LAB ONLY: packages are installed at every start. Production
+              # bakes an image with these and tfci into an internal registry.
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends \
+                curl jq git ca-certificates libicu74
+              rm -rf /var/lib/apt/lists/*
+
+              # One CA bundle: the public roots (Azure DevOps, agent download)
+              # plus the lab TFE CA. SSL_CERT_FILE points here.
+              cat /etc/ssl/certs/ca-certificates.crt /etc/tfe-ca/ca.pem \
+                > "${SSL_CERT_FILE}"
+
+              export PATH="/opt/tools/bin:${PATH}"
+              command -v tfci
+
+              cp /opt/azp-start/start.sh /azp/start.sh
+              chmod 0700 /azp/start.sh
+              exec /azp/start.sh
+          env:
+            - name: AZP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: azdo-agent
+                  key: url
+            - name: AZP_POOL
+              valueFrom:
+                secretKeyRef:
+                  name: azdo-agent
+                  key: pool
+            - name: AZP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: azdo-agent
+                  key: token
+            - name: AZP_AGENT_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: AZP_WORK
+              value: /azp/_work
+            - name: TARGETARCH
+              value: linux-x64
+            # LAB ONLY: the agent refuses to configure as root without this.
+            # A baked production image runs as a non-root user instead.
+            - name: AGENT_ALLOW_RUNASROOT
+              value: "1"
+            # Go's crypto/x509 reads SSL_CERT_FILE, so tfci trusts the lab CA
+            # without changing the system store. The file is the public roots
+            # plus /etc/tfe-ca/ca.pem, built at start. It cannot be the lab CA
+            # alone: curl and the agent read SSL_CERT_FILE too, and would then
+            # fail to reach Azure DevOps.
+            - name: SSL_CERT_FILE
+              value: /azp/ca-bundle.pem
+            - name: TF_HOSTNAME
+              value: tfe.lab.internal
+          securityContext:
+            # LAB ONLY: root because apt runs at start. A baked image runs
+            # with runAsNonRoot: true and drops ALL capabilities.
+            runAsUser: 0
+            privileged: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # The minimum apt and dpkg need to install packages and switch
+              # to the _apt user. All are in the Pod Security baseline set.
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: tools-bin
+              mountPath: /opt/tools/bin
+              readOnly: true
+            - name: start-script
+              mountPath: /opt/azp-start
+              readOnly: true
+            - name: tfe-ca
+              mountPath: /etc/tfe-ca
+              readOnly: true
+            - name: azp
+              mountPath: /azp
+
+      # No hostPath and no Docker socket: only emptyDirs, a ConfigMap script
+      # and the CA ConfigMap.
+      volumes:
+        - name: tools-bin
+          emptyDir: {}
+        - name: azp
+          emptyDir: {}
+        - name: start-script
+          configMap:
+            name: azdo-agent-start
+            defaultMode: 0444
+        - name: tfe-ca
+          configMap:
+            name: tfe-ca
+            items:
+              - key: ca.pem
+                path: ca.pem
