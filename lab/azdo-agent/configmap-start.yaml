@@ -249,8 +249,18 @@ data:
       print_header "5. Cycle ${cycle}: fresh agent from the cache..."
 
       # Nothing a previous job wrote is kept: the agent, its config and
-      # credentials, _diag and _work all go.
+      # credentials, _diag and _work all go, and so does every other file the
+      # job user could write (its home, /tmp, /var/tmp, /dev/shm, anything else
+      # it owns on the root filesystem or the /azp volume). The container is
+      # not restarted between jobs, so this is what stops one job leaving
+      # something behind for the next.
       cd /
+      rm -rf "${AZP_HOME}"
+      install -d -o azp -g azp -m 0700 "${AZP_HOME}"
+      for d in /tmp /var/tmp /dev/shm /azp; do
+        find "${d}" -xdev -mindepth 1 -user "${AZP_UID}" -prune -exec rm -rf {} + 2>/dev/null || true
+      done
+      find / -xdev -user "${AZP_UID}" -not -path "${AZP_HOME}" -prune -exec rm -rf {} + 2>/dev/null || true
       rm -rf "${AGENT_DIR}"
       install -d -o root -g root -m 0755 "${AGENT_DIR}"
       tar -xzf "${AGENT_TARBALL}" -C "${AGENT_DIR}"
