@@ -8,7 +8,7 @@ resources:
     - repository: tfc
       type: git
       name: lab-project/tfc-workflow-azdo
-      ref: refs/tags/v2.0.0-rc.1
+      ref: refs/tags/v2.0.0-rc.2
 
 extends:
   template: templates/pipelines/speculative-run.yml@tfc
@@ -23,3 +23,6 @@ extends:
     # The lab agent has no terraform or tflint binaries; validate is covered by
     # tests/run.sh. A production agent image would include them.
     enableValidate: false
+    # Lab only: PR authors are trusted here and the workspace holds no secrets,
+    # so show the plan text in the PR comment (default is off; see docs/security.md).
+    showPlanLog: true
