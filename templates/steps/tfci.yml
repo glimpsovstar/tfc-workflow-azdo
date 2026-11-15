@@ -1,0 +1,237 @@
+# One step that runs any tfci command: `tfci <command> --json <args> <textArgs>`.
+#
+# Every tfci call in these templates goes through this file. It owns the image,
+# hostname, CA bundle, token handling and execution mode.
+#
+# Values:
+#   command   A tfci command from tests/tfci-v1.4.0-commands.txt, e.g. "run create".
+#   args      Flags that never contain spaces, e.g. "--plan-only=true". They are
+#             split on whitespace (no quote handling, no globbing). Never put
+#             user-controlled text (branch, PR title, requester) in args.
+#   textArgs  Map of flag name to value, for values that may contain spaces
+#             (message, comment, workspace, directory). Each becomes one
+#             argument "--<name>=<value>", passed through an env var, so the
+#             value is never parsed by the shell. Keys: letters and underscores
+#             only (tfci's string flags all qualify).
+#   The checker (tests/check_templates.rb, rule tfci-param-command) verifies the
+#   command, the flags in args and the textArgs keys against the manifest.
+#
+# Token: the pipeline variable named by tokenVariable (a secret) is mapped to
+# TF_API_TOKEN through env: only. docker run gets "-e TF_API_TOKEN", the name
+# only, so the value never appears on a command line.
+#
+# CA bundle: caBundle is an absolute path on the agent to a PEM file with the
+# private CA (the CA alone or a full bundle both work). The file is put in its
+# own directory and SSL_CERT_DIR points at it. Go (tfci) then trusts the
+# certificates in that directory in addition to the system bundle file
+# (/etc/ssl/certs/ca-certificates.crt in the image), so public roots still
+# work. There is no option to skip TLS verification: a missing or wrong CA
+# makes tfci fail with a TLS error. A caBundle path that does not exist fails
+# the step before tfci runs.
+#
+# Output: tfci's JSON stdout is written to outputFile (default
+# $(Agent.TempDirectory)/tfci-<name>.json). tfci's exit code is the step's exit
+# code; a short summary of the JSON is printed either way.
+#
+# Modes:
+#   docker  docker run the pinned image (agents with Docker). Only the
+#           variables named with -e reach the container.
+#   native  tfci from the agent's PATH (agents without Docker, e.g. pods).
+#           tfci runs with every other variable unset, keeping an allowlist: PATH, HOME, the TF_*
+#           variables this step sets, SSL_CERT_DIR and SSL_CERT_FILE, and the
+#           proxy variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY, either case)
+#           when the agent sets them. tfci reads every TF_VAR_* variable in its
+#           environment as a run variable (var_file.go, v1.4.0), so an agent or
+#           pipeline TF_VAR_* never leaks into a run.
+#
+# hostname: required, no default, so a token is never sent to a host the
+# caller did not name.
+#
+# logLevel: '' (default, tfci logs off), ERROR, WARN, INFO or DEBUG. When set it
+# becomes TF_LOG for tfci (passed as -e TF_LOG in docker mode). DEBUG: keep it
+# out of shared logs as a precaution. Levels match tfci's ValidLevels
+# (internal/logging/logging.go, v1.4.0).
+parameters:
+  - name: name
+    type: string
+  - name: displayName
+    type: string
+  - name: command
+    type: string
+  - name: args
+    type: string
+    default: ''
+  - name: textArgs
+    type: object
+    default: {}
+  - name: mode
+    type: string
+    default: docker
+    values:
+      - docker
+      - native
+  - name: image
+    type: string
+    default: hashicorp/tfci:v1.4.0
+  - name: hostname
+    type: string
+  - name: organization
+    type: string
+  - name: caBundle
+    type: string
+    default: ''
+  - name: workingDirectory
+    type: string
+    default: $(System.DefaultWorkingDirectory)
+  - name: tokenVariable
+    type: string
+    default: TF_API_TOKEN
+  - name: maxTimeout
+    type: string
+    default: 1h
+  - name: outputFile
+    type: string
+    default: ''
+  - name: logLevel
+    type: string
+    default: ''
+
+  - name: condition
+    type: string
+    default: succeeded()
+
+steps:
+  - bash: |
+      set -euo pipefail
+
+      out="$TFCI_OUTPUT_FILE"
+      if [[ -z "$out" ]]; then
+        out="$TFCI_TEMP_DIR/tfci-$TFCI_STEP_NAME.json"
+      fi
+      mkdir -p "$(dirname "$out")"
+
+      # Split command and args on whitespace without globbing.
+      read -r -a cmd <<<"$TFCI_COMMAND"
+      read -r -a extra <<<"$TFCI_ARGS"
+      if [[ ${#cmd[@]} -eq 0 ]]; then
+        echo "##vso[task.logissue type=error]tfci.yml: command is empty"
+        exit 1
+      fi
+      # textArgs arrive as TFCI_TEXT_<flag> env vars; each is one argument.
+      text=()
+      while IFS= read -r var; do
+        flag="${var#TFCI_TEXT_}"
+        text+=("--${flag,,}=${!var}")
+      done < <(compgen -v TFCI_TEXT_ || true)
+
+      # An undefined pipeline variable is passed through as the literal text "$(NAME)".
+      # shellcheck disable=SC2016 # literal "$(" on purpose
+      if [[ -z "${TF_API_TOKEN:-}" || "$TF_API_TOKEN" == '$('* ]]; then
+        echo "##vso[task.logissue type=error]tfci.yml: the token variable '$TFCI_TOKEN_VARIABLE' is empty or not defined"
+        exit 1
+      fi
+      if [[ ! -d "$TFCI_WORKDIR" ]]; then
+        echo "##vso[task.logissue type=error]tfci.yml: workingDirectory '$TFCI_WORKDIR' does not exist"
+        exit 1
+      fi
+      case "$TFCI_LOG_LEVEL" in
+        '' | ERROR | WARN | INFO | DEBUG) ;;
+        *)
+          echo "##vso[task.logissue type=error]tfci.yml: logLevel '$TFCI_LOG_LEVEL' must be empty, ERROR, WARN, INFO or DEBUG"
+          exit 1
+          ;;
+      esac
+      # An agent-wide TF_LOG must not switch tfci logging on by itself.
+      if [[ -n "$TFCI_LOG_LEVEL" ]]; then
+        export TF_LOG="$TFCI_LOG_LEVEL"
+      else
+        unset TF_LOG
+      fi
+      if [[ -n "$TFCI_CA_BUNDLE" ]]; then
+        if [[ "$TFCI_CA_BUNDLE" != /* || ! -f "$TFCI_CA_BUNDLE" ]]; then
+          echo "##vso[task.logissue type=error]tfci.yml: caBundle '$TFCI_CA_BUNDLE' must be an absolute path to an existing file"
+          exit 1
+        fi
+      fi
+
+      echo "tfci ${cmd[*]} --json (mode: $TFCI_MODE, host: $TF_HOSTNAME, org: $TF_CLOUD_ORGANIZATION)"
+      rc=0
+      case "$TFCI_MODE" in
+        docker)
+          run=(run --rm -e TF_API_TOKEN -e TF_HOSTNAME -e TF_CLOUD_ORGANIZATION -e TF_MAX_TIMEOUT)
+          if [[ -n "$TFCI_LOG_LEVEL" ]]; then
+            run+=(-e TF_LOG)
+          fi
+          if [[ -n "$TFCI_CA_BUNDLE" ]]; then
+            run+=(-v "$TFCI_CA_BUNDLE:/tfci/ca/tfe-ca.pem:ro" -e SSL_CERT_DIR=/tfci/ca)
+          fi
+          run+=(-v "$TFCI_WORKDIR:/tfci/workspace" --workdir /tfci/workspace "$TFCI_IMAGE" tfci)
+          # No pipe: stdout goes straight to the file, so $? is tfci's exit code.
+          docker "${run[@]}" "${cmd[@]}" --json ${extra[@]+"${extra[@]}"} ${text[@]+"${text[@]}"} >"$out" || rc=$?
+          ;;
+        native)
+          if [[ -n "$TFCI_CA_BUNDLE" ]]; then
+            ca_dir="$TFCI_TEMP_DIR/tfci-ca-$TFCI_STEP_NAME"
+            mkdir -p "$ca_dir"
+            cp "$TFCI_CA_BUNDLE" "$ca_dir/tfe-ca.pem"
+            export SSL_CERT_DIR="$ca_dir"
+          fi
+          # Allowlist: tfci reads every TF_VAR_* as a run variable, so it gets
+          # a clean environment with only what it needs.
+          keep=(PATH HOME TF_API_TOKEN TF_HOSTNAME TF_CLOUD_ORGANIZATION TF_MAX_TIMEOUT TF_LOG
+            SSL_CERT_DIR SSL_CERT_FILE HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy)
+          cd "$TFCI_WORKDIR"
+          # Unset everything else inside a subshell, then exec tfci. Nothing
+          # secret goes on any command line (passing NAME=value to env would put the
+          # token in argv, readable through /proc on a shared agent).
+          (
+            while IFS= read -r n; do
+              case " ${keep[*]} " in
+                *" $n "*) ;;
+                *) unset "$n" 2>/dev/null || true ;;
+              esac
+            done < <(compgen -e)
+            exec tfci "${cmd[@]}" --json ${extra[@]+"${extra[@]}"} ${text[@]+"${text[@]}"}
+          ) >"$out" || rc=$?
+          ;;
+        *)
+          echo "##vso[task.logissue type=error]tfci.yml: unknown mode '$TFCI_MODE' (docker or native)"
+          exit 1
+          ;;
+      esac
+
+      # Short summary. Only flat, non-secret keys; never the whole document.
+      if jq -e 'type == "object"' "$out" >/dev/null 2>&1; then
+        jq -r '. as $o
+          | ["status", "run_id", "run_status", "plan_id", "plan_status",
+             "configuration_version_id", "configuration_version_status",
+             "add", "change", "destroy", "run_link"][]
+          | select($o[.] != null) | "  \(.): \($o[.])"' "$out"
+      else
+        echo "  tfci wrote no JSON to $out"
+      fi
+      if [[ $rc -ne 0 ]]; then
+        echo "##vso[task.logissue type=error]tfci ${cmd[*]} exited with $rc"
+      fi
+      exit "$rc"
+    name: ${{ parameters.name }}
+    displayName: ${{ parameters.displayName }}
+    condition: ${{ parameters.condition }}
+    env:
+      TF_API_TOKEN: $(${{ parameters.tokenVariable }})
+      TF_HOSTNAME: ${{ parameters.hostname }}
+      TF_CLOUD_ORGANIZATION: ${{ parameters.organization }}
+      TF_MAX_TIMEOUT: ${{ parameters.maxTimeout }}
+      TFCI_COMMAND: ${{ parameters.command }}
+      TFCI_ARGS: ${{ parameters.args }}
+      TFCI_MODE: ${{ parameters.mode }}
+      TFCI_IMAGE: ${{ parameters.image }}
+      TFCI_CA_BUNDLE: ${{ parameters.caBundle }}
+      TFCI_WORKDIR: ${{ parameters.workingDirectory }}
+      TFCI_OUTPUT_FILE: ${{ parameters.outputFile }}
+      TFCI_TOKEN_VARIABLE: ${{ parameters.tokenVariable }}
+      TFCI_STEP_NAME: ${{ parameters.name }}
+      TFCI_TEMP_DIR: $(Agent.TempDirectory)
+      TFCI_LOG_LEVEL: ${{ parameters.logLevel }}
+      ${{ each arg in parameters.textArgs }}:
+        ${{ format('TFCI_TEXT_{0}', arg.key) }}: ${{ arg.value }}

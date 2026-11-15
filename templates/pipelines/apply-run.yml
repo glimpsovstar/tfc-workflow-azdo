@@ -1,0 +1,390 @@
+# Extends template for the main branch: plan, approval, apply.
+#
+#   Stage Plan, job plan: checkout, validate (optional, off by default because
+#     the PR already validated), upload, run-create (a real run, a saved
+#     plan by default, not plan only), plan-output, plan-log (optional, on by
+#     default), then a gate step that logs what happens next.
+#   Stage Apply, deployment job apply on `environment`: waits for the
+#     environment's checks (approval), then applies the run from the Plan
+#     stage by its ID. It applies that run only, never a newer one.
+#
+# Apply method (applyMethod):
+#   pipeline (default)  as above: an Azure DevOps environment approval, then
+#                       the pipeline applies with the apply token.
+#   tfe                 a person confirms and applies the run in TFE. The
+#                       Plan stage creates a normal confirmable run (savePlan
+#                       is forced off, so the run waits in TFE as "needs
+#                       confirmation" like a native TFE run), and the gate logs
+#                       "Confirm and apply run <id> in TFE: <link>. The
+#                       pipeline does not apply in this mode." There is no
+#                       Apply stage: environment and applyVariableGroup are
+#                       not used, and the pipeline holds only the plan token,
+#                       so a leaked pipeline token cannot apply. The approver
+#                       sees the real plan and the policy results in TFE.
+#                       Approvers are a TFE team with apply permission (see
+#                       docs/setup.md, "Production: confirm in TFE").
+#                       The pipeline result is the plan's result; it does not
+#                       wait for the confirmation or the apply.
+#   environment is required when applyMethod is pipeline: with environment ''
+#   a config_check step fails the Plan job before anything is uploaded.
+#
+# BEFORE USE:
+#   1. Turn Auto apply OFF on the workspace. With it on, TFE applies the run
+#      as soon as the plan finishes, before anyone approves in Azure DevOps
+#      or confirms in TFE. The Plan stage fails when it sees the run already
+#      applying or applied.
+#   2. applyMethod pipeline: on the Azure DevOps environment `environment`,
+#      add an Approvals check and a Branch control check that allows only
+#      refs/heads/main. Add an Exclusive lock check too, so applies run one
+#      at a time.
+#   3. applyMethod pipeline: on the variable group `applyVariableGroup`
+#      (default tfc-apply), which holds the apply token, add the same Branch
+#      control check (refs/heads/main) and an approval, and grant pipeline
+#      permission only to this pipeline.
+#   The Plan stage uses `planVariableGroup` (default tfc-plan), a token with
+#   plan permission only.
+#
+# Run status sets. The canonical lists live in tests/status_sets_test.rb,
+# which fails when the gate `case`, the Apply stage condition or pr-comment.yml
+# drift from them:
+#   APPLYABLE_MAIN  planned, planned_and_saved, cost_estimated, policy_checked,
+#                   post_plan_completed, policy_override
+#   PLAN_OK_PR      planned_and_finished, post_plan_completed (pr-comment.yml)
+#   PLAN_SOFT       policy_soft_failed (pr-comment.yml)
+# tfci's run create waits for one of these (getDesiredRunStatus, run.go,
+# v1.4.0): always policy_soft_failed, planned_and_finished, applied and
+# post_plan_completed; planned_and_saved with savePlan; and for a confirmable
+# run cost_estimated (cost estimation on, policies off), policy_checked and
+# policy_override (policies on), or planned (neither).
+#
+# When does Apply run? Stage condition:
+#   and(succeeded(), in(dependencies.Plan.outputs['plan.run.RUN_STATUS'], <APPLYABLE_MAIN>))
+#   - APPLYABLE_MAIN: the gate step says the Apply stage waits for approval.
+#     policy_override also logs a warning: a policy needs an override in TFE
+#     before the approver approves, or the apply fails with "cannot be applied".
+#   - planned_and_finished (no changes): Apply is skipped. The Plan stage logs
+#     "No changes: nothing to apply" and succeeds, so the run succeeds.
+#   - any other status (for example applied, or policy_soft_failed) fails the
+#     Plan stage in the gate step, so nothing is skipped silently.
+#
+# Saved plans (savePlan, default true): the Plan stage creates a saved-plan run
+# (tfci run create --save-plan). It ends in planned_and_saved and does not lock
+# the workspace or become its current run until the Apply stage applies it
+# (run_create.go, v1.4.0). If the approval is rejected or expires, the saved
+# plan stays behind and does not block the workspace. Re-run the pipeline for
+# a fresh plan rather than applying the old one.
+# Assumption, to confirm in the end-to-end test: tfci run apply applies a
+# planned_and_saved run, that is TFE reports it confirmable. Neither tfci
+# v1.4.0 nor go-tfe says so; the TFE runs API lists planned_and_saved as a
+# state that can be confirmed for apply
+# (developer.hashicorp.com/terraform/enterprise/api-docs/run).
+# Two merges close together plan at once and apply in order (lockBehavior:
+# sequential). Confirmed in the lab (TFE 2.1.1, 2026-11-15): when the
+# first run applies, TFE discards the second saved plan, so the second Apply
+# fails safely with run status 'discarded' and needs a re-run.
+#
+# Concurrency: the Apply stage sets lockBehavior: sequential. With an
+# Exclusive lock check on the environment, runs then take the environment one
+# at a time, in order, instead of the default runLatest (which cancels older
+# runs). lockBehavior can be set on a stage or on the whole pipeline:
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/approvals?view=azure-devops#exclusive-lock
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/yaml-schema/stages-stage?view=azure-pipelines
+#
+# Job timeouts: every job sets timeoutInMinutes from jobTimeoutInMinutes
+# (default 90). Keep it above maxTimeout (default 1h), or Azure DevOps cancels
+# the job while tfci still waits for the run.
+# Syntax: "Expressions", section "Dependencies", stage to stage example
+#   condition: and(succeeded(), eq(dependencies.A.outputs['A1.printvar.shouldrun'], 'true'))
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/expressions?view=azure-devops#dependencies
+# in(): "Evaluates True if left parameter is equal to any right parameter",
+#   ordinal ignore-case for strings.
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/expressions?view=azure-devops#in
+#
+# The run ID reaches the deployment job through a job-level variable:
+#   RUN_ID: $[ stageDependencies.Plan.plan.outputs['run.RUN_ID'] ]
+# "Set variables in scripts", section "Set an output variable for use in
+# future stages":
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/set-variables-scripts?view=azure-devops#set-an-output-variable-for-use-in-future-stages
+# The docs show this form in a regular job's variables and in a deployment
+# job's stage-level variables; a deployment job's job-level variables is
+# unverified until the first server-side compile.
+#
+# Deployment jobs do not check out source, and download pipeline artifacts in
+# the deploy hook unless `- download: none` is set. run-apply needs no code, so
+# it runs in $(Agent.TempDirectory).
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/deployment-jobs?view=azure-devops
+#
+# Step templates are referenced by relative path (../steps/...), which resolves
+# from this file inside the template repository when consumed with @alias.
+# To confirm in the first server-side compile.
+parameters:
+  - name: workspace
+    type: string
+  - name: organization
+    type: string
+  # Required: the token only ever goes to the host named here.
+  - name: hostname
+    type: string
+  # Terraform configuration directory, relative to the repository root.
+  - name: directory
+    type: string
+    default: ./
+  # Agent pool for both jobs, e.g. {name: tfe-agents}.
+  - name: pool
+    type: object
+  - name: mode
+    type: string
+    default: docker
+    values:
+      - docker
+      - native
+  - name: image
+    type: string
+    default: hashicorp/tfci:v1.4.0
+  # Absolute path on the agent to a PEM file with the private CA for TFE.
+  - name: caBundle
+    type: string
+    default: ''
+  - name: planVariableGroup
+    type: string
+    default: tfc-plan
+  - name: applyVariableGroup
+    type: string
+    default: tfc-apply
+  # Both groups hold the token under this variable name.
+  - name: tokenVariable
+    type: string
+    default: TF_API_TOKEN
+  # pipeline: Azure DevOps approval, then the pipeline applies.
+  # tfe: a person confirms the run in TFE; no Apply stage (see the header).
+  - name: applyMethod
+    type: string
+    default: pipeline
+    values:
+      - pipeline
+      - tfe
+  - name: maxTimeout
+    type: string
+    default: 1h
+  # Minutes before Azure DevOps cancels a job. Must exceed maxTimeout.
+  - name: jobTimeoutInMinutes
+    type: number
+    default: 90
+  # Create the main-branch run as a saved plan (see the header). Ignored,
+  # always off, when applyMethod is tfe.
+  - name: savePlan
+    type: boolean
+    default: true
+  # tfci TF_LOG: '', ERROR, WARN, INFO or DEBUG. Keep DEBUG out of shared logs as a precaution.
+  - name: logLevel
+    type: string
+    default: ''
+  # Azure DevOps environment with an approval and a branch control check.
+  # Required when applyMethod is pipeline; not used when it is tfe.
+  - name: environment
+    type: string
+    default: ''
+  # Print the Terraform plan text in the log (plan-log.yml).
+  - name: showPlanLog
+    type: boolean
+    default: true
+  - name: enableValidate
+    type: boolean
+    default: false
+  - name: enableTflint
+    type: boolean
+    default: true
+  # Validate step images and settings (see templates/steps/validate.yml).
+  - name: terraformImage
+    type: string
+    default: hashicorp/terraform:1.17.0
+  - name: tflintImage
+    type: string
+    default: ghcr.io/terraform-linters/tflint:v0.66.0
+  - name: cliConfigFile
+    type: string
+    default: ''
+  - name: validateCaBundle
+    type: string
+    default: ''
+
+stages:
+  - stage: Plan
+    displayName: Plan
+    jobs:
+      - job: plan
+        displayName: Plan (${{ parameters.workspace }})
+        pool: ${{ parameters.pool }}
+        timeoutInMinutes: ${{ parameters.jobTimeoutInMinutes }}
+        variables:
+          - group: ${{ parameters.planVariableGroup }}
+        steps:
+          # environment is optional in the parameter list only because tfe
+          # mode does not use it. Fail early, before any upload, without it.
+          - ${{ if eq(parameters.applyMethod, 'pipeline') }}:
+              - ${{ if eq(parameters.environment, '') }}:
+                  - bash: |
+                      set -euo pipefail
+                      echo "##vso[task.logissue type=error]apply-run: environment is required when applyMethod is pipeline. Pass the Azure DevOps environment that holds the approval, or set applyMethod: tfe."
+                      exit 1
+                    name: config_check
+                    displayName: Check template parameters
+
+          - checkout: self
+
+          - ${{ if eq(parameters.enableValidate, true) }}:
+              - template: ../steps/validate.yml
+                parameters:
+                  directory: $(System.DefaultWorkingDirectory)/${{ parameters.directory }}
+                  mode: ${{ parameters.mode }}
+                  terraformImage: ${{ parameters.terraformImage }}
+                  tflintImage: ${{ parameters.tflintImage }}
+                  enableTflint: ${{ parameters.enableTflint }}
+                  caBundle: ${{ parameters.validateCaBundle }}
+                  cliConfigFile: ${{ parameters.cliConfigFile }}
+
+          - template: ../steps/upload.yml
+            parameters:
+              workspace: ${{ parameters.workspace }}
+              directory: ${{ parameters.directory }}
+              speculative: false
+              mode: ${{ parameters.mode }}
+              image: ${{ parameters.image }}
+              hostname: ${{ parameters.hostname }}
+              organization: ${{ parameters.organization }}
+              caBundle: ${{ parameters.caBundle }}
+              tokenVariable: ${{ parameters.tokenVariable }}
+              maxTimeout: ${{ parameters.maxTimeout }}
+              logLevel: ${{ parameters.logLevel }}
+
+          - template: ../steps/run-create.yml
+            parameters:
+              workspace: ${{ parameters.workspace }}
+              configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
+              planOnly: false
+              # tfe mode: a confirmable run, never a saved plan, so it waits
+              # in TFE as "needs confirmation".
+              ${{ if eq(parameters.applyMethod, 'tfe') }}:
+                savePlan: false
+              ${{ else }}:
+                savePlan: ${{ parameters.savePlan }}
+              mode: ${{ parameters.mode }}
+              image: ${{ parameters.image }}
+              hostname: ${{ parameters.hostname }}
+              organization: ${{ parameters.organization }}
+              caBundle: ${{ parameters.caBundle }}
+              tokenVariable: ${{ parameters.tokenVariable }}
+              maxTimeout: ${{ parameters.maxTimeout }}
+              logLevel: ${{ parameters.logLevel }}
+
+          - template: ../steps/plan-output.yml
+            parameters:
+              condition: and(succeededOrFailed(), ne(variables['run.PLAN_ID'], ''))
+              planId: $(run.PLAN_ID)
+              workspace: ${{ parameters.workspace }}
+              runLink: $(run.RUN_LINK)
+              runStatus: $(run.RUN_STATUS)
+              configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
+              mode: ${{ parameters.mode }}
+              image: ${{ parameters.image }}
+              hostname: ${{ parameters.hostname }}
+              organization: ${{ parameters.organization }}
+              caBundle: ${{ parameters.caBundle }}
+              tokenVariable: ${{ parameters.tokenVariable }}
+              maxTimeout: ${{ parameters.maxTimeout }}
+              logLevel: ${{ parameters.logLevel }}
+
+          - ${{ if eq(parameters.showPlanLog, true) }}:
+              - template: ../steps/plan-log.yml
+                parameters:
+                  condition: and(succeededOrFailed(), ne(variables['run.PLAN_ID'], ''))
+                  planId: $(run.PLAN_ID)
+                  hostname: ${{ parameters.hostname }}
+                  caBundle: ${{ parameters.caBundle }}
+                  tokenVariable: ${{ parameters.tokenVariable }}
+
+          # Says what happens next: the Apply stage, or a confirmation in TFE. The arms marked APPLYABLE_MAIN
+          # must match the Apply stage condition (tests/status_sets_test.rb).
+          - bash: |
+              set -euo pipefail
+              echo "Workspace Auto apply must be off, or TFE applies before anyone approves or confirms."
+              echo "Run $RUN_ID: $RUN_STATUS ($RUN_LINK)"
+              if [[ "$APPLY_METHOD" == tfe ]]; then
+                next="Confirm and apply run $RUN_ID in TFE: $RUN_LINK. The pipeline does not apply in this mode."
+                none="No changes: nothing to confirm in TFE."
+                who="without a confirmation in TFE"
+              else
+                next="Changes to apply: the Apply stage waits for the environment approval."
+                none="No changes: nothing to apply. The Apply stage is skipped."
+                who="without an approval"
+              fi
+              case "$RUN_STATUS" in
+                planned | planned_and_saved | cost_estimated | policy_checked | post_plan_completed) # APPLYABLE_MAIN
+                  if [[ "$APPLY_METHOD" == tfe ]]; then
+                    echo "##vso[task.logissue type=warning]$next"
+                  fi
+                  echo "$next"
+                  ;;
+                policy_override) # APPLYABLE_MAIN
+                  echo "##vso[task.logissue type=warning]A policy needs an override in TFE before this run can be applied: $RUN_LINK"
+                  echo "$next Override the policy in TFE first, or the apply fails."
+                  ;;
+                planned_and_finished)
+                  echo "$none"
+                  ;;
+                applying | apply_queued | applied | confirmed)
+                  echo "##vso[task.logissue type=error]Run $RUN_ID is already $RUN_STATUS $who: turn Auto apply off on the workspace."
+                  exit 1
+                  ;;
+                *)
+                  echo "##vso[task.logissue type=error]Run $RUN_ID ended the plan in '$RUN_STATUS', which cannot be confirmed or applied. See the run in TFE."
+                  exit 1
+                  ;;
+              esac
+            name: gate
+            displayName: Decide whether to apply
+            env:
+              RUN_ID: $(run.RUN_ID)
+              RUN_STATUS: $(run.RUN_STATUS)
+              RUN_LINK: $(run.RUN_LINK)
+              APPLY_METHOD: ${{ parameters.applyMethod }}
+
+  # tfe mode has no Apply stage: a person confirms the run in TFE.
+  - ${{ if eq(parameters.applyMethod, 'pipeline') }}:
+    - stage: Apply
+      displayName: Apply
+      dependsOn: Plan
+      # APPLYABLE_MAIN. Keep in step with the gate step (tests/status_sets_test.rb).
+      condition: and(succeeded(), in(dependencies.Plan.outputs['plan.run.RUN_STATUS'], 'planned', 'planned_and_saved', 'cost_estimated', 'policy_checked', 'post_plan_completed', 'policy_override'))
+      # Runs take the environment one at a time, in order, when it has an
+      # Exclusive lock check (see the header).
+      lockBehavior: sequential
+      jobs:
+        - deployment: apply
+          displayName: Apply (${{ parameters.workspace }})
+          pool: ${{ parameters.pool }}
+          timeoutInMinutes: ${{ parameters.jobTimeoutInMinutes }}
+          environment: ${{ parameters.environment }}
+          # Job level, not stage level (stage level is unverified for this).
+          variables:
+            - group: ${{ parameters.applyVariableGroup }}
+            - name: RUN_ID
+              value: $[ stageDependencies.Plan.plan.outputs['run.RUN_ID'] ]
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  # No artifacts to download; deployment jobs do not check out.
+                  - download: none
+                  - template: ../steps/run-apply.yml
+                    parameters:
+                      runId: $(RUN_ID)
+                      workingDirectory: $(Agent.TempDirectory)
+                      mode: ${{ parameters.mode }}
+                      image: ${{ parameters.image }}
+                      hostname: ${{ parameters.hostname }}
+                      organization: ${{ parameters.organization }}
+                      caBundle: ${{ parameters.caBundle }}
+                      tokenVariable: ${{ parameters.tokenVariable }}
+                      maxTimeout: ${{ parameters.maxTimeout }}
+                      logLevel: ${{ parameters.logLevel }}

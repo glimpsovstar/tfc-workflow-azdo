@@ -1,0 +1,146 @@
+# Apply a run that is waiting for confirmation: `tfci run apply --json`.
+#
+# tfci waits until the run is applied and exits 1 when the apply errors, is
+# canceled or discarded, the run cannot be applied, or TF_MAX_TIMEOUT
+# (maxTimeout) passes. A run in planned_and_finished (no changes) has nothing
+# to apply: tfci returns 0 with status "Noop" (run_apply.go, v1.4.0) and this
+# template logs it, so the apply stage succeeds as a no-op.
+#
+# A run that is not confirmable (for example policy_override, waiting for a
+# policy override in TFE) makes tfci exit 1 with "cannot be applied" and JSON
+# status "Error". The output step then logs: override the policy in TFE (or
+# discard the run) and re-run the pipeline.
+#
+# Output variables (step name = the `name` parameter, default "apply"):
+#   RUN_STATUS     e.g. applied, planned_and_finished
+#   APPLY_RESULT   tfci's status: Success or Noop
+# Same job:        $(apply.RUN_STATUS)
+#
+# comment must not contain PR text, branch names or other user-controlled
+# values. The default names the build only.
+parameters:
+  - name: name
+    type: string
+    default: apply
+  - name: displayName
+    type: string
+    default: Apply run
+  - name: runId
+    type: string
+  - name: comment
+    type: string
+    default: Applied by Azure DevOps build $(Build.BuildId)
+  # Connection parameters, passed through to tfci.yml unchanged. Same
+  # defaults as tfci.yml; hostname is required there too.
+  - name: mode
+    type: string
+    default: docker
+    values:
+      - docker
+      - native
+  - name: image
+    type: string
+    default: hashicorp/tfci:v1.4.0
+  - name: hostname
+    type: string
+  - name: organization
+    type: string
+  - name: caBundle
+    type: string
+    default: ''
+  - name: workingDirectory
+    type: string
+    default: $(System.DefaultWorkingDirectory)
+  - name: tokenVariable
+    type: string
+    default: TF_API_TOKEN
+  - name: maxTimeout
+    type: string
+    default: 1h
+  - name: logLevel
+    type: string
+    default: ''
+
+steps:
+  - bash: |
+      set -euo pipefail
+      if [[ ! "$RUN_ID" =~ ^run-[A-Za-z0-9]+$ ]]; then
+        echo "##vso[task.logissue type=error]run-apply: runId '$RUN_ID' is not a run ID (run-...)"
+        exit 1
+      fi
+    name: ${{ parameters.name }}_check
+    displayName: ${{ parameters.displayName }} (check input)
+    env:
+      RUN_ID: ${{ parameters.runId }}
+
+  - template: tfci.yml
+    parameters:
+      name: ${{ parameters.name }}_tfci
+      displayName: ${{ parameters.displayName }}
+      command: run apply
+      textArgs:
+        run: ${{ parameters.runId }}
+        comment: ${{ parameters.comment }}
+      outputFile: $(Agent.TempDirectory)/tfci-${{ parameters.name }}.json
+      mode: ${{ parameters.mode }}
+      image: ${{ parameters.image }}
+      hostname: ${{ parameters.hostname }}
+      organization: ${{ parameters.organization }}
+      caBundle: ${{ parameters.caBundle }}
+      workingDirectory: ${{ parameters.workingDirectory }}
+      tokenVariable: ${{ parameters.tokenVariable }}
+      maxTimeout: ${{ parameters.maxTimeout }}
+      logLevel: ${{ parameters.logLevel }}
+
+  - bash: |
+      set -euo pipefail
+      if [[ ! -s "$TFCI_OUT" ]]; then
+        echo "##vso[task.logissue type=error]run-apply: $TFCI_OUT is missing or empty: tfci did not run or wrote no JSON"
+        exit 1
+      fi
+      result="$(jq -r '.status // empty' "$TFCI_OUT")"
+      run_status="$(jq -r '.run_status // empty' "$TFCI_OUT")"
+      if [[ -n "$run_status" && ! "$run_status" =~ ^[a-z_]+$ ]]; then
+        echo "##vso[task.logissue type=error]run-apply: unexpected run_status '$run_status'"
+        exit 1
+      fi
+      case "$result" in
+        Success)
+          echo "run applied: $run_status"
+          ;;
+        Noop)
+          echo "nothing to apply: the run is $run_status (no changes), tfci returned 0"
+          ;;
+        Error)
+          case "$run_status" in
+            discarded)
+              # Seen in the lab (2026-11-15): when another run applies
+              # first, TFE discards the older saved plan, so nothing stale
+              # is applied.
+              echo "##vso[task.logissue type=error]Run $RUN_ID was discarded in TFE, usually because a newer run applied first and this saved plan went stale. Nothing was applied. Re-run the pipeline for a fresh plan."
+              ;;
+            apply_queued | applying | applied | confirmed | errored | canceled | force_canceled | '')
+              echo "##vso[task.logissue type=error]run-apply: tfci could not apply run $RUN_ID (run status '${run_status:-unknown}'). See the run in TFE."
+              ;;
+            *)
+              # tfci's "cannot be applied": the run is not confirmable, for
+              # example policy_override waiting for an override.
+              echo "##vso[task.logissue type=error]Run $RUN_ID is $run_status and cannot be applied yet. If a policy needs an override, override it in TFE (or discard the run), then re-run the pipeline."
+              ;;
+          esac
+          exit 1
+          ;;
+        *)
+          echo "##vso[task.logissue type=error]run-apply: unexpected tfci status '$result'"
+          exit 1
+          ;;
+      esac
+      echo "##vso[task.setvariable variable=RUN_STATUS;isOutput=true]$run_status"
+      echo "##vso[task.setvariable variable=APPLY_RESULT;isOutput=true]$result"
+    name: ${{ parameters.name }}
+    displayName: ${{ parameters.displayName }} (outputs)
+    # Also after a tfci failure, to explain it (for example a policy override).
+    condition: succeededOrFailed()
+    env:
+      TFCI_OUT: $(Agent.TempDirectory)/tfci-${{ parameters.name }}.json
+      RUN_ID: ${{ parameters.runId }}

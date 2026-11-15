@@ -1,0 +1,27 @@
+# Minimal extends template that composes the step template.
+parameters:
+  - name: workspace
+    type: string
+  - name: planOnly
+    type: boolean
+    default: true
+
+stages:
+  - stage: Plan
+    jobs:
+      - job: Plan
+        container:
+          image: ubuntu:24.04
+        steps:
+          - checkout: self
+          - template: tfci-step.yml
+            parameters:
+              workspace: ${{ parameters.workspace }}
+              planOnly: ${{ parameters.planOnly }}
+          - script: |
+              # comments before strict mode are allowed
+              set -euo pipefail
+              tfci run show --json --run="$RUN_ID"
+            displayName: Show run
+            env:
+              RUN_ID: $(RUN_ID)

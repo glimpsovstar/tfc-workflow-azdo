@@ -1,0 +1,6 @@
+# A runtime macro into a boolean parameter: compared before the macro expands.
+steps:
+  - template: templates/steps.yml
+    parameters:
+      name: demo
+      enabled: $(ENABLE_THING)

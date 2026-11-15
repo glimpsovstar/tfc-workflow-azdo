@@ -1,0 +1,15 @@
+# Consumer pipeline that pins the templates repo by tag. Paths with @alias
+# point into another repository, so the checker does not resolve them.
+trigger: none
+
+resources:
+  repositories:
+    - repository: tfc
+      type: git
+      name: platform/tfc-workflow-azdo
+      ref: refs/tags/v2.0.0
+
+extends:
+  template: templates/pipelines/speculative-run.yml@tfc
+  parameters:
+    workspace: demo-workspace

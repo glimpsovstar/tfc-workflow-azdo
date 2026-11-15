@@ -1,0 +1,23 @@
+# lab consumer: production pattern. Plans with the plan-only token and
+# stops; a person with apply permission confirms the run in TFE. Run by hand.
+trigger: none
+pr: none
+
+resources:
+  repositories:
+    - repository: tfc
+      type: git
+      name: lab-project/tfc-workflow-azdo
+      ref: refs/tags/v2.0.0-rc.3
+
+extends:
+  template: templates/pipelines/apply-run.yml@tfc
+  parameters:
+    workspace: lab-app
+    organization: my-org
+    hostname: tfe.lab.internal
+    pool:
+      name: lab-aks
+    mode: native
+    caBundle: /etc/tfe-ca/ca.pem
+    applyMethod: tfe

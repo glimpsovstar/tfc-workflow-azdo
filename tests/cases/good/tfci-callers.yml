@@ -1,0 +1,24 @@
+# Calls the real tfci wrapper. Placeholders inside args are ignored by the
+# tfci-param-command rule; flag names next to them are still checked.
+steps:
+  - template: /templates/steps/tfci.yml
+    parameters:
+      name: show
+      displayName: Show run
+      organization: demo-org
+      hostname: tfe.example.internal
+      command: run show
+      textArgs:
+        run: $(run.RUN_ID)
+  - template: /templates/steps/tfci.yml
+    parameters:
+      name: create
+      displayName: Create run
+      organization: demo-org
+      hostname: tfe.example.internal
+      command: run create
+      args: --plan-only=${{ parameters.planOnly }} --refresh=$(REFRESH)
+      textArgs:
+        workspace: demo
+        configuration_version: $(upload.CONFIGURATION_VERSION_ID)
+        message: Azure DevOps build $(Build.BuildId)

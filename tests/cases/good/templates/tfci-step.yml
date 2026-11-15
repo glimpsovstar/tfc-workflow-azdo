@@ -1,0 +1,40 @@
+# Minimal step template: runs tfci in a pinned image, token through env: only.
+parameters:
+  - name: workspace
+    type: string
+  - name: planOnly
+    type: boolean
+    default: true
+  - name: image
+    type: string
+    default: hashicorp/tfci:v1.4.0
+  - name: hostname
+    type: string
+    default: app.terraform.io
+
+steps:
+  - bash: |
+      set -euo pipefail
+      # Upload, then create a run on that configuration version.
+      CV_ID="$(docker run --rm \
+        -e TF_API_TOKEN \
+        -e TF_CLOUD_ORGANIZATION \
+        -v "$CONFIG_DIR:/tfci/workspace" \
+        --workdir /tfci/workspace \
+        "${{ parameters.image }}" \
+        tfci --hostname="${{ parameters.hostname }}" upload --json \
+          --workspace="${{ parameters.workspace }}" --directory=./ --speculative=${{ parameters.planOnly }} \
+        | jq -r '.configuration_version_id')"
+      docker run --rm -e TF_API_TOKEN -e TF_CLOUD_ORGANIZATION "${{ parameters.image }}" \
+        tfci --hostname="${{ parameters.hostname }}" run create --json \
+          --workspace="${{ parameters.workspace }}" \
+          --configuration_version="$CV_ID" \
+          --plan-only=${{ parameters.planOnly }} \
+          --message="Run for $SOURCE_BRANCH" > run.json
+      jq -r '.run_id' run.json
+    displayName: tfci upload and run create
+    env:
+      TF_API_TOKEN: $(TF_API_TOKEN)
+      TF_CLOUD_ORGANIZATION: $(TF_CLOUD_ORGANIZATION)
+      CONFIG_DIR: $(Build.SourcesDirectory)
+      SOURCE_BRANCH: $(Build.SourceBranchName)

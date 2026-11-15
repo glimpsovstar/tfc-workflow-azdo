@@ -1,0 +1,6 @@
+# Bash script without set -euo pipefail: failures pass silently.
+steps:
+  - script: |
+      # leading comments are fine, but the first command must be strict mode
+      echo "no strict mode"
+    displayName: Not strict

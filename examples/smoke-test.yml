@@ -1,0 +1,87 @@
+# Smoke test for an agent and a TFE: uploads tests/fixtures/random as a
+# speculative configuration version, creates a plan-only run on it and prints
+# the plan summary. It proves network access, the token and the CA bundle.
+# Nothing is applied.
+#
+# Lives in this repository, so it uses the step templates by local path (a
+# leading / is the repository root). Run it by hand: Pipelines, New pipeline,
+# Existing Azure Pipelines YAML file, examples/smoke-test.yml.
+#
+# Variable group tfc-plan must hold TF_API_TOKEN (plan permission is enough).
+# The workspace must use the CLI-driven (API) workflow.
+trigger: none
+pr: none
+
+parameters:
+  - name: workspace
+    displayName: TFE workspace (CLI-driven workflow)
+    type: string
+  - name: poolName
+    displayName: Agent pool
+    type: string
+    default: tfe-agents
+  - name: mode
+    displayName: tfci mode
+    type: string
+    default: docker
+    values:
+      - docker
+      - native
+  # 'none' for a public CA. A sentinel, because the queue form may not accept
+  # an empty string for a runtime parameter.
+  - name: caBundle
+    displayName: CA bundle path on the agent (none for a public CA)
+    type: string
+    default: none
+
+pool:
+  name: ${{ parameters.poolName }}
+
+# The hostname and organization are fixed here, not runtime parameters: the
+# token in tfc-plan must only ever go to this TFE. Changing them is a reviewed
+# commit, not a field anyone who can queue the pipeline can edit.
+variables:
+  - group: tfc-plan
+  - name: TFE_HOSTNAME
+    value: tfe.example.internal
+  - name: TFE_ORGANIZATION
+    value: my-org
+
+steps:
+  - checkout: self
+
+  - template: /templates/steps/upload.yml
+    parameters:
+      workspace: ${{ parameters.workspace }}
+      directory: tests/fixtures/random
+      speculative: true
+      mode: ${{ parameters.mode }}
+      hostname: ${{ variables.TFE_HOSTNAME }}
+      organization: ${{ variables.TFE_ORGANIZATION }}
+      ${{ if ne(parameters.caBundle, 'none') }}:
+        caBundle: ${{ parameters.caBundle }}
+
+  - template: /templates/steps/run-create.yml
+    parameters:
+      workspace: ${{ parameters.workspace }}
+      configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
+      planOnly: true
+      message: Smoke test, Azure DevOps build $(Build.BuildId)
+      mode: ${{ parameters.mode }}
+      hostname: ${{ variables.TFE_HOSTNAME }}
+      organization: ${{ variables.TFE_ORGANIZATION }}
+      ${{ if ne(parameters.caBundle, 'none') }}:
+        caBundle: ${{ parameters.caBundle }}
+
+  - template: /templates/steps/plan-output.yml
+    parameters:
+      planId: $(run.PLAN_ID)
+      workspace: ${{ parameters.workspace }}
+      runLink: $(run.RUN_LINK)
+      runStatus: $(run.RUN_STATUS)
+      configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
+      mode: ${{ parameters.mode }}
+      hostname: ${{ variables.TFE_HOSTNAME }}
+      organization: ${{ variables.TFE_ORGANIZATION }}
+      ${{ if ne(parameters.caBundle, 'none') }}:
+        caBundle: ${{ parameters.caBundle }}

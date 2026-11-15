@@ -1,0 +1,182 @@
+# Validate step template: terraform fmt -check, init -backend=false and
+# validate, then tflint. Steps only, so the caller keeps them in its own job.
+#
+# Any failure fails the job. There is no continueOnError.
+#
+# Modes:
+#   docker  runs the pinned images below. Both images set ENTRYPOINT to their
+#           binary (hashicorp/terraform: /bin/terraform, tflint: tflint), so the
+#           arguments start at the subcommand: `docker run IMAGE fmt`, never
+#           `docker run IMAGE terraform fmt` (the v1 bug).
+#   native  runs terraform and tflint from the agent's PATH.
+#
+# Network access:
+#   `terraform init` downloads providers from registry.terraform.io unless the
+#   CLI config says otherwise. With no internet access, point Terraform at a
+#   provider network_mirror (or filesystem_mirror) in a CLI config file and pass
+#   it as `cliConfigFile`; it is exported as TF_CLI_CONFIG_FILE. If the agent
+#   already has TF_CLI_CONFIG_FILE set, that file is used when `cliConfigFile`
+#   is empty. Example config:
+#     provider_installation {
+#       network_mirror { url = "https://mirror.example.internal/providers/" }
+#     }
+#   If the mirror uses a private CA, pass the CA bundle as `caBundle`. It is set
+#   as SSL_CERT_FILE for init, which replaces the system roots, so the bundle
+#   must also hold any public roots init still needs.
+#
+#   `tflint --init` downloads plugins from GitHub. It runs only when the
+#   directory's .tflint.hcl has a `source =` line (a plugin to download). The
+#   bundled terraform ruleset needs no download. With no internet access, keep
+#   to the bundled ruleset or bake plugins into the image or agent. tflint uses
+#   GITHUB_TOKEN from the agent environment, if set, to avoid rate limits.
+#
+# Images are pinned by tag. Pin by digest in production, for example
+#   hashicorp/terraform:1.17.0@sha256:4d1b496a256f2989bccdb04b9104a4ede97234b10fba90259e173e905ec4fb58
+#   ghcr.io/terraform-linters/tflint:v0.66.0@sha256:65b9944a9274c4989492c1d79998c2801664bf8a55fddb4bd3a9e6d73a006ddc
+# (digests as pulled on 2026-11-15; linux/arm64 was the platform checked).
+#
+# Docker mode runs containers as the agent's user, so nothing root-owned is
+# left in the sources directory. Terraform's data directory (.terraform) and
+# tflint's plugins go to temporary directories that are removed afterwards.
+# Only .terraform.lock.hcl is written to `directory`: init creates it if it is
+# missing and adds the agent platform's h1: hashes if they are not there. The
+# change stays in the agent's checkout. -lockfile=readonly is not used because
+# a lock file made on one platform (say darwin_arm64) then fails validate on a
+# Linux agent. To avoid both, commit hashes for every platform:
+#   terraform providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_arm64
+
+parameters:
+  - name: directory
+    type: string
+    default: $(System.DefaultWorkingDirectory)
+  - name: mode
+    type: string
+    default: docker
+    values:
+      - docker
+      - native
+  - name: terraformImage
+    type: string
+    default: hashicorp/terraform:1.17.0
+  - name: tflintImage
+    type: string
+    default: ghcr.io/terraform-linters/tflint:v0.66.0
+  - name: enableTflint
+    type: boolean
+    default: true
+  # Path on the agent to a PEM bundle, for init against a private mirror.
+  - name: caBundle
+    type: string
+    default: ''
+  # Path on the agent to a Terraform CLI config file (TF_CLI_CONFIG_FILE).
+  - name: cliConfigFile
+    type: string
+    default: ''
+
+steps:
+  - bash: |
+      set -euo pipefail
+      dir="$(cd "$WORK_DIR" && pwd)"
+      case "$MODE" in
+        docker)
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -v "$dir:/work" -w /work \
+            "$TF_IMAGE" fmt -check -recursive -diff
+          ;;
+        native)
+          terraform -chdir="$dir" fmt -check -recursive -diff
+          ;;
+        *)
+          echo "##vso[task.logissue type=error]unknown mode '$MODE' (docker or native)"
+          exit 1
+          ;;
+      esac
+    displayName: terraform fmt -check
+    env:
+      WORK_DIR: ${{ parameters.directory }}
+      MODE: ${{ parameters.mode }}
+      TF_IMAGE: ${{ parameters.terraformImage }}
+
+  - bash: |
+      set -euo pipefail
+      dir="$(cd "$WORK_DIR" && pwd)"
+      data_dir="$(mktemp -d "${AGENT_TEMP:-/tmp}/tfdata.XXXXXX")"
+      trap 'rm -rf "$data_dir"' EXIT
+      cli_config="${CLI_CONFIG_FILE:-${TF_CLI_CONFIG_FILE:-}}"
+      export TF_IN_AUTOMATION=1 CHECKPOINT_DISABLE=1
+      case "$MODE" in
+        docker)
+          tf=(docker run --rm --user "$(id -u):$(id -g)"
+            -e TF_IN_AUTOMATION -e CHECKPOINT_DISABLE -e HOME=/tmp
+            -e TF_DATA_DIR=/tfdata -v "$data_dir:/tfdata"
+            -v "$dir:/work" -w /work)
+          if [[ -n "$cli_config" ]]; then
+            tf+=(-v "$cli_config:/tfcli/config.tfrc:ro" -e TF_CLI_CONFIG_FILE=/tfcli/config.tfrc)
+          fi
+          if [[ -n "$CA_BUNDLE" ]]; then
+            tf+=(-v "$CA_BUNDLE:/etc/ssl/certs/tfe-ca.pem:ro" -e SSL_CERT_FILE=/etc/ssl/certs/tfe-ca.pem)
+          fi
+          tf+=("$TF_IMAGE")
+          ;;
+        native)
+          export TF_DATA_DIR="$data_dir"
+          if [[ -n "$cli_config" ]]; then
+            export TF_CLI_CONFIG_FILE="$cli_config"
+          fi
+          if [[ -n "$CA_BUNDLE" ]]; then
+            export SSL_CERT_FILE="$CA_BUNDLE"
+          fi
+          tf=(terraform -chdir="$dir")
+          ;;
+        *)
+          echo "##vso[task.logissue type=error]unknown mode '$MODE' (docker or native)"
+          exit 1
+          ;;
+      esac
+      "${tf[@]}" init -backend=false -input=false -no-color
+      "${tf[@]}" validate -no-color
+    displayName: terraform init and validate
+    env:
+      WORK_DIR: ${{ parameters.directory }}
+      MODE: ${{ parameters.mode }}
+      TF_IMAGE: ${{ parameters.terraformImage }}
+      CA_BUNDLE: ${{ parameters.caBundle }}
+      CLI_CONFIG_FILE: ${{ parameters.cliConfigFile }}
+      AGENT_TEMP: $(Agent.TempDirectory)
+
+  - ${{ if eq(parameters.enableTflint, true) }}:
+      - bash: |
+          set -euo pipefail
+          dir="$(cd "$WORK_DIR" && pwd)"
+          plugin_dir="$(mktemp -d "${AGENT_TEMP:-/tmp}/tflint.XXXXXX")"
+          trap 'rm -rf "$plugin_dir"' EXIT
+          case "$MODE" in
+            docker)
+              lint=(docker run --rm --user "$(id -u):$(id -g)"
+                -e HOME=/tmp -e GITHUB_TOKEN
+                -e TFLINT_PLUGIN_DIR=/plugins -v "$plugin_dir:/plugins"
+                -v "$dir:/data" -w /data
+                "$TFLINT_IMAGE")
+              ;;
+            native)
+              export TFLINT_PLUGIN_DIR="$plugin_dir"
+              lint=(tflint --chdir="$dir")
+              ;;
+            *)
+              echo "##vso[task.logissue type=error]unknown mode '$MODE' (docker or native)"
+              exit 1
+              ;;
+          esac
+          # Plugins are downloaded only when .tflint.hcl declares one with source =.
+          if [[ -f "$dir/.tflint.hcl" ]] && grep -Eq '^[[:space:]]*source[[:space:]]*=' "$dir/.tflint.hcl"; then
+            "${lint[@]}" --init
+          else
+            echo "No plugin with a source in .tflint.hcl: skipping tflint --init"
+          fi
+          "${lint[@]}" --no-color
+        displayName: tflint
+        env:
+          WORK_DIR: ${{ parameters.directory }}
+          MODE: ${{ parameters.mode }}
+          TFLINT_IMAGE: ${{ parameters.tflintImage }}
+          AGENT_TEMP: $(Agent.TempDirectory)

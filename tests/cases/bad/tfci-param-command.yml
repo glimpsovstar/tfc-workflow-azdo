@@ -1,0 +1,21 @@
+# Calls the tfci wrapper template with a command tfci does not have, a flag
+# that does not exist, a global flag in args, and a textArgs key that is not
+# a flag of the command. Placeholders inside args are ignored.
+steps:
+  - template: templates/tfci.yml
+    parameters:
+      name: ws_list
+      command: workspace list
+  - template: templates/tfci.yml
+    parameters:
+      name: show
+      command: run show
+      args: --run=$(RUN_ID) --format=json ${{ parameters.extra }}
+  - template: templates/tfci.yml
+    parameters:
+      name: create
+      command: run create
+      args: --hostname=tfe.example.com --plan-only=true
+      textArgs:
+        workspace: demo
+        comment: not a run create flag

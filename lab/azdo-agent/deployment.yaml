@@ -1,0 +1,187 @@
+# Lab Azure DevOps self-hosted agent, native mode (tfci on the PATH, no Docker).
+#
+# The pod only opens outbound connections: it polls Azure DevOps and calls TFE
+# at https://tfe.lab.internal inside the VNet. Nothing calls in, so there is
+# no Service and no Ingress.
+#
+# Needs, created by David before apply (see README.md):
+#   - Secret    azdo-agent  keys: url, pool, token
+#   - ConfigMap tfe-ca      key:  ca.pem (lab TFE CA)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: azdo-agent
+  namespace: azdo-agents
+  labels:
+    app.kubernetes.io/name: azdo-agent
+    app.kubernetes.io/part-of: tfc-workflow-azdo
+spec:
+  # Two agents keep the pool non-empty while one re-registers. Each agent
+  # deregisters after every job and registers again a few seconds later, and
+  # Azure DevOps fails queued jobs at once when the pool has no agent ("No
+  # agent found in pool ... which satisfies the specified demands").
+  replicas: 2
+  # Replace one pod at a time and never run a third: the other pod keeps an
+  # agent in the pool during a rollout. Recreate would stop both pods and
+  # empty the pool. The readiness probe below holds the rollout until the
+  # new pod's agent is configured.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: azdo-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: azdo-agent
+    spec:
+      # The agent never talks to the Kubernetes API.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # On SIGTERM start.sh gives a running job up to 60s to stop, then
+      # retries agent removal up to 10 times, 30s apart. A SIGTERM that lands
+      # during a cycle's own removal waits for it to finish (about 30s at
+      # most). Give it time.
+      terminationGracePeriodSeconds: 420
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+
+      initContainers:
+        # Copies the static tfci binary out of the pinned image into a shared
+        # emptyDir. Runs as non-root with a read-only root filesystem. The
+        # agent container mounts it read-only, so nothing there can change it.
+        - name: tfci
+          image: hashicorp/tfci:v1.4.0
+          imagePullPolicy: IfNotPresent
+          command: ["cp", "/usr/local/bin/tfci", "/opt/tools/bin/tfci"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: tools-bin
+              mountPath: /opt/tools/bin
+
+      containers:
+        - name: agent
+          # Pinned by tag for the lab. Pin by digest for anything longer lived:
+          #   image: ubuntu:24.04@sha256:<digest>
+          image: ubuntu:24.04
+          imagePullPolicy: IfNotPresent
+          workingDir: /azp
+          # start.sh runs as root and is PID 1. It installs packages, builds
+          # the CA bundle, then loops: register, one job as UID 1001,
+          # deregister. The container does not exit between jobs.
+          command: ["/bin/bash", "/opt/azp-start/start.sh"]
+          # No secret is in the environment. URL, pool and PAT are files in
+          # the azp-secret volume, readable only by root.
+          env:
+            # The agent name is the pod name, so each replica registers
+            # under its own name.
+            - name: AZP_AGENT_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TARGETARCH
+              value: linux-x64
+            # Go's crypto/x509 reads SSL_CERT_FILE, so tfci trusts the lab CA
+            # without changing the system store. Node-based tasks read
+            # NODE_EXTRA_CA_CERTS. The file is the public roots plus
+            # /etc/tfe-ca/ca.pem, built at start, root-owned and 0444. It
+            # cannot be the lab CA alone: curl and the agent read
+            # SSL_CERT_FILE too, and would then fail to reach Azure DevOps.
+            - name: SSL_CERT_FILE
+              value: /etc/azp-ca/bundle.pem
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/azp-ca/bundle.pem
+            # No TF_HOSTNAME here: the pipelines pass `hostname`, which is
+            # required, and tfci.yml sets TF_HOSTNAME from it.
+          securityContext:
+            # LAB ONLY: the container starts as root because start.sh runs
+            # apt, useradd, chown and setpriv. Root only does setup and
+            # supervision; the agent and jobs run as UID 1001 with an empty
+            # bounding set and no_new_privs. A baked production image runs
+            # with runAsNonRoot: true and drops ALL capabilities.
+            runAsUser: 0
+            privileged: false
+            # setpriv dropping to UID 1001 works with this set.
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # CHOWN, DAC_OVERRIDE, FOWNER, FSETID, SETUID, SETGID: apt,
+              # dpkg, useradd and chown. SETUID, SETGID: setpriv switching to
+              # UID 1001. SETPCAP: setpriv emptying the bounding set (without
+              # it the drop is silently skipped). KILL: root stopping the
+              # UID 1001 agent and stray job processes at cleanup. All are in
+              # the Pod Security baseline set. None reach UID 1001.
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID", "SETPCAP", "KILL"]
+          # Ready once the agent has been configured for the first time.
+          # start.sh creates the file as root; UID 1001 cannot write /run.
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/run/azp-ready"]
+            periodSeconds: 10
+            failureThreshold: 3
+          # Per pod. Two replicas request 500m CPU and 1Gi in total; the lab
+          # nodes have about 3.8 CPU and 15Gi allocatable each.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: tools-bin
+              mountPath: /opt/tools/bin
+              readOnly: true
+            - name: start-script
+              mountPath: /opt/azp-start
+              readOnly: true
+            - name: tfe-ca
+              mountPath: /etc/tfe-ca
+              readOnly: true
+            - name: azp-secret
+              mountPath: /etc/azp-secret
+              readOnly: true
+            - name: azp
+              mountPath: /azp
+
+      # No hostPath and no Docker socket: only emptyDirs, a ConfigMap script,
+      # the CA ConfigMap and the agent secret.
+      volumes:
+        - name: tools-bin
+          emptyDir: {}
+        - name: azp
+          emptyDir: {}
+        - name: start-script
+          configMap:
+            name: azdo-agent-start
+            defaultMode: 0444
+        # Keys url, pool and token become root-owned 0400 files. UID 1001
+        # cannot read them.
+        - name: azp-secret
+          secret:
+            secretName: azdo-agent
+            defaultMode: 0400
+        - name: tfe-ca
+          configMap:
+            name: tfe-ca
+            items:
+              - key: ca.pem
+                path: ca.pem

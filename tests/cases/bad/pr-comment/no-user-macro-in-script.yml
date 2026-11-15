@@ -1,0 +1,9 @@
+# The PR comment step must take the PR ID through env:, not as a macro in the
+# script body. This is the mistake pr-comment.yml must not make.
+steps:
+  - bash: |
+      set -euo pipefail
+      curl --fail-with-body -sS "${COLLECTION_URI}_apis/git/pullrequests/$(System.PullRequest.PullRequestId)"
+    displayName: PR macro in script
+    env:
+      COLLECTION_URI: $(System.CollectionUri)

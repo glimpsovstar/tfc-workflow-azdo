@@ -1,0 +1,25 @@
+# lab consumer: main (plan, approval, apply).
+trigger:
+  branches:
+    include:
+      - main
+pr: none
+
+resources:
+  repositories:
+    - repository: tfc
+      type: git
+      name: lab-project/tfc-workflow-azdo
+      ref: refs/tags/v2.0.0-rc.3
+
+extends:
+  template: templates/pipelines/apply-run.yml@tfc
+  parameters:
+    workspace: lab-app
+    organization: my-org
+    hostname: tfe.lab.internal
+    pool:
+      name: lab-aks
+    mode: native
+    caBundle: /etc/tfe-ca/ca.pem
+    environment: lab-prod

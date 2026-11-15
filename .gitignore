@@ -4,9 +4,17 @@
 *.tfvars
 *.tfvars.json
 .terraform/
-.terraform.lock.hcl
+*.tfplan
 terraform.tfplan
 terraform.tfplan.json
+# .terraform.lock.hcl is committed on purpose: it pins provider versions and hashes.
+
+# Credentials and local overrides: never commit
+.terraformrc
+terraform.rc
+credentials.tfrc.json
+.env
+*.local.*
 
 # Azure DevOps
 .vscode/

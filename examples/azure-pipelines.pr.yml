@@ -1,0 +1,31 @@
+# Pull request pipeline: a speculative plan on the PR's code, posted to the PR.
+#
+# Azure Repos does not use the YAML `pr:` trigger. PR builds come from branch
+# policy build validation: Project settings, Repositories, <repo>, Policies,
+# Branch policies for main, Build validation, add this pipeline. So both
+# triggers are off here; the policy queues the build for each PR update.
+#
+# Replace the placeholder values below. Variable group tfc-plan must hold
+# TF_API_TOKEN, a TFE team token with plan permission only.
+trigger: none
+pr: none
+
+resources:
+  repositories:
+    - repository: tfc
+      type: git
+      name: <Project>/tfc-workflow-azdo
+      # The v2.0.0 tag is created at release. Until then this ref does not resolve.
+      ref: refs/tags/v2.0.0
+
+extends:
+  template: templates/pipelines/speculative-run.yml@tfc
+  parameters:
+    workspace: my-app-dev
+    organization: my-org
+    hostname: tfe.example.internal
+    pool:
+      name: tfe-agents
+    mode: docker
+    # Absolute path on the agent to the TFE CA PEM file, or '' for a public CA.
+    caBundle: ''

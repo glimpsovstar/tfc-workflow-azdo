@@ -1,0 +1,275 @@
+# Post the Terraform plan summary to the pull request as one thread, and set a
+# PR status, through the Azure DevOps REST API with System.AccessToken.
+#
+# Runs only for PR builds (Build.Reason == PullRequest). On a re-run for the
+# same PR it updates its own thread, found by a hidden marker line
+# `<!-- tfc-workflow-azdo:<workspace> -->`, instead of adding a new one.
+#
+# Every pipeline value reaches the script through env: only. No $(...) macro
+# is expanded inside the script body.
+#
+# The build service identity needs "Contribute to pull requests" on the repo.
+#
+# Stale builds: before it writes anything, the step reads the PR
+# (lastMergeSourceCommit.commitId) and compares it with this build's
+# System.PullRequest.SourceCommitId. If a newer push exists, it skips both the
+# comment and the status and logs why, so an older build that finishes last
+# cannot overwrite the newer plan. The comment and the status description name
+# the short commit they were planned from.
+#
+# Plan text: when includePlanLog is true and planLogFile (written by
+# plan-log.yml) exists, the comment ends with the plan in a collapsed
+# <details><summary>Terraform plan</summary> block and a ```text fence.
+# Triple backticks in the log are replaced with ''' so they cannot close the
+# fence. The plan part is capped at 100,000 characters (cut at a line end, with
+# a "trimmed" note). Azure DevOps does not document a size limit for PR
+# comments (Comments, Create, REST 7.1), so the cap is a safe margin, not a
+# documented limit. The plan log shows every value not marked sensitive: see
+# docs/security.md. When includePlanLog is true but the file is missing (the
+# plan-log step warned or did not run), the comment says the plan text is not
+# available and links the run.
+#
+# The plan text goes to Azure DevOps in the request body only. The one place an
+# API response reaches the job log (the first 1,000 bytes on a failed call,
+# which can echo the comment) has every "##" broken up first, so text from the
+# plan cannot run a logging command.
+#
+# PR status from the run status. The canonical sets are in
+# tests/status_sets_test.rb, which checks the lists in the script below:
+#   PLAN_OK_PR  planned_and_finished, post_plan_completed: succeeded
+#   PLAN_SOFT   policy_soft_failed: failed, "soft-mandatory policy failed:
+#               override in TFE"
+#   anything else (errored, canceled, unknown): failed
+#
+# API reference (REST API 7.1):
+#   Pull Requests, Get: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/get-pull-request?view=azure-devops-rest-7.1
+#   Threads, List:    https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/list?view=azure-devops-rest-7.1
+#   Threads, Create:  https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/create?view=azure-devops-rest-7.1
+#   Comments, Update: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-thread-comments/update?view=azure-devops-rest-7.1
+#   Statuses, Create: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-statuses/create?view=azure-devops-rest-7.1
+# Create thread body follows the "Comment on the pull request" sample there:
+# commentType 1 (text), status 1 (active).
+
+parameters:
+  - name: summaryFile
+    type: string
+    default: $(Agent.TempDirectory)/plan-summary.md
+  - name: workspace
+    type: string
+  - name: runLink
+    type: string
+    default: ''
+  - name: runStatus
+    type: string
+    default: ''
+  # Optional plan counts, for the PR status description (plan-output.yml outputs).
+  - name: add
+    type: string
+    default: ''
+  - name: change
+    type: string
+    default: ''
+  - name: destroy
+    type: string
+    default: ''
+  # The trimmed plan log from plan-log.yml, appended in a collapsed block.
+  - name: planLogFile
+    type: string
+    default: $(Agent.TempDirectory)/plan-log.txt
+  - name: includePlanLog
+    type: boolean
+    default: true
+  - name: statusContextGenre
+    type: string
+    default: terraform
+  - name: statusContextName
+    type: string
+    default: tfe-plan
+  - name: condition
+    type: string
+    default: succeededOrFailed()
+  - name: displayName
+    type: string
+    default: Post plan to pull request
+
+steps:
+  - bash: |
+      set -euo pipefail
+
+      api_version="7.1"
+      ok_states=" planned_and_finished post_plan_completed " # PLAN_OK_PR
+      soft_states=" policy_soft_failed " # PLAN_SOFT
+
+      # A runtime macro that did not resolve arrives as its own text: treat it as empty.
+      unresolved() { [[ "$1" == "\$("* ]]; }
+      if unresolved "$RUN_STATUS"; then RUN_STATUS=""; fi
+      if unresolved "$RUN_LINK"; then RUN_LINK=""; fi
+      for v in PLAN_ADD PLAN_CHANGE PLAN_DESTROY; do
+        if unresolved "${!v}"; then printf -v "$v" '%s' ""; fi
+      done
+      status_text="${RUN_STATUS:-unknown}"
+
+      for v in SYSTEM_ACCESSTOKEN COLLECTION_URI PROJECT REPO_ID PR_ID SOURCE_COMMIT WORKSPACE; do
+        if [[ -z "${!v:-}" ]]; then
+          echo "##vso[task.logissue type=error]pr-comment: $v is empty"
+          exit 1
+        fi
+      done
+      if [[ ! "$PR_ID" =~ ^[0-9]+$ ]]; then
+        echo "##vso[task.logissue type=error]pr-comment: pull request ID is not a number"
+        exit 1
+      fi
+      if [[ ! "$SOURCE_COMMIT" =~ ^[0-9a-f]{7,64}$ ]]; then
+        echo "##vso[task.logissue type=error]pr-comment: source commit is not a commit ID"
+        exit 1
+      fi
+      short_commit="${SOURCE_COMMIT:0:8}"
+
+      uri_encode() { jq -rn --arg v "$1" '$v | @uri'; }
+      base="${COLLECTION_URI%/}/$(uri_encode "$PROJECT")/_apis/git/repositories/$(uri_encode "$REPO_ID")/pullRequests/$PR_ID"
+
+      tmp="$(mktemp -d)"
+      trap 'rm -rf "$tmp"' EXIT
+      resp="$tmp/response.json"
+
+      # api METHOD URL [BODY_FILE]: response body goes to $resp.
+      # The token goes to curl through a header file, not argv, and is never printed.
+      api() {
+        local method="$1" url="$2" body="${3:-}" code rc=0
+        local args=(--fail-with-body -sS -X "$method" -o "$resp" -w '%{http_code}' -H 'Accept: application/json')
+        if [[ -n "$body" ]]; then
+          args+=(-H 'Content-Type: application/json' --data-binary "@$body")
+        fi
+        code="$(curl "${args[@]}" -H @<(printf 'Authorization: Bearer %s\n' "$SYSTEM_ACCESSTOKEN") "$url" 2>"$tmp/curl.err")" || rc=$?
+        if [[ "$code" == 401 || "$code" == 403 ]]; then
+          echo "##vso[task.logissue type=error]Azure DevOps returned HTTP $code for $method ${url%%\?*}. The build service identity needs 'Contribute to pull requests' on this repository (Project settings, Repositories, Security)."
+          exit 1
+        fi
+        if [[ $rc -ne 0 ]]; then
+          echo "##vso[task.logissue type=error]Azure DevOps API call failed: $method ${url%%\?*} (HTTP ${code:-none}, curl exit $rc)"
+          cat "$tmp/curl.err" >&2
+          # The response can echo the comment, plan text included: break up "##".
+          if [[ -s "$resp" ]]; then head -c 1000 "$resp" | LC_ALL=C sed -e ':a' -e 's/##/# #/g' -e 'ta' >&2; echo >&2; fi
+          exit 1
+        fi
+      }
+
+      # Is this build still for the newest push? Pull Requests, Get.
+      api GET "$base?api-version=$api_version"
+      head_commit="$(jq -r '.lastMergeSourceCommit.commitId // empty' "$resp")"
+      if [[ -n "$head_commit" && "$head_commit" != "$SOURCE_COMMIT" ]]; then
+        echo "A newer push exists on this PR (${head_commit:0:8}, this build planned ${short_commit}): skipping the PR comment and status."
+        exit 0
+      fi
+
+      # Comment body: marker, then the summary, or a fallback line.
+      marker="<!-- tfc-workflow-azdo:${WORKSPACE} -->"
+      if [[ -s "$SUMMARY_FILE" ]]; then
+        summary="$(cat "$SUMMARY_FILE")"
+      else
+        echo "##vso[task.logissue type=warning]Plan summary $SUMMARY_FILE not found: posting the run status only"
+        summary="**Terraform plan for \`${WORKSPACE}\`:** plan output not available."
+        summary+=$'\n\n'"Run status: \`${status_text}\`"
+        if [[ -n "$RUN_LINK" ]]; then summary+=$'\n\n'"Run: ${RUN_LINK}"; fi
+      fi
+      content="${marker}"$'\n'"${summary}"$'\n\n'"Commit: \`${short_commit}\`"
+
+      # The plan text, collapsed, after the summary.
+      if [[ "${INCLUDE_PLAN_LOG,,}" == true && -s "$PLAN_LOG_FILE" ]]; then
+        max_plan_chars=100000
+        plan_log="$(cat "$PLAN_LOG_FILE")"
+        fence='```'
+        plan_log="${plan_log//"$fence"/"'''"}"
+        plan_note=""
+        if [[ ${#plan_log} -gt $max_plan_chars ]]; then
+          plan_log="${plan_log:0:$max_plan_chars}"
+          # Cut at the last whole line.
+          if [[ "$plan_log" == *$'\n'* ]]; then plan_log="${plan_log%$'\n'*}"; fi
+          plan_note=$'\n\n'"Plan text trimmed at ${max_plan_chars} characters: see the run in TFE for the full plan."
+        fi
+        content+=$'\n\n'"<details><summary>Terraform plan</summary>"$'\n\n'"${fence}text"$'\n'"${plan_log}"$'\n'"${fence}${plan_note}"$'\n\n'"</details>"
+      elif [[ "${INCLUDE_PLAN_LOG,,}" == true ]]; then
+        echo "Plan log $PLAN_LOG_FILE not found: the comment says the plan text is not available"
+        if [[ -n "$RUN_LINK" ]]; then
+          content+=$'\n\n'"Plan text not available here: see the run in TFE: ${RUN_LINK}"
+        else
+          content+=$'\n\n'"Plan text not available here: see the run in TFE."
+        fi
+      fi
+
+      # Who is this build? Only threads whose first comment was written by this
+      # identity count as ours, so a marker pasted by someone else is ignored.
+      api GET "${COLLECTION_URI%/}/_apis/connectionData"
+      me="$(jq -r '.authenticatedUser.id // empty' "$resp")"
+
+      # Find our own thread: the first comment of a live thread, written by us,
+      # carries the marker.
+      api GET "$base/threads?api-version=$api_version"
+      found="$(jq -r --arg m "$marker" --arg me "$me" '
+        [ (.value // [])[]
+          | select((.isDeleted // false) | not)
+          | select((.comments // []) | length > 0)
+          | { tid: .id, c: (.comments | sort_by(.id) | .[0]) }
+          | select((.c.isDeleted // false) | not)
+          | select($me != "" and (.c.author.id // "") == $me)
+          | select((.c.content // "") | contains($m)) ]
+        | first // empty
+        | "\(.tid) \(.c.id)"' "$resp")"
+
+      if [[ -n "$found" ]]; then
+        read -r thread_id comment_id <<<"$found"
+        jq -n --arg content "$content" '{content: $content}' >"$tmp/body.json"
+        api PATCH "$base/threads/$thread_id/comments/$comment_id?api-version=$api_version" "$tmp/body.json"
+        echo "Updated PR thread $thread_id"
+      else
+        jq -n --arg content "$content" \
+          '{comments: [{parentCommentId: 0, content: $content, commentType: 1}], status: 1}' >"$tmp/body.json"
+        api POST "$base/threads?api-version=$api_version" "$tmp/body.json"
+        echo "Created PR thread $(jq -r '.id // "?"' "$resp")"
+      fi
+
+      # PR status.
+      if [[ -n "$PLAN_ADD" && -n "$PLAN_CHANGE" && -n "$PLAN_DESTROY" ]]; then
+        description="Plan: +${PLAN_ADD} ~${PLAN_CHANGE} -${PLAN_DESTROY} (${status_text})"
+      else
+        description="Terraform run ${status_text}"
+      fi
+      if [[ -n "$RUN_STATUS" && "$ok_states" == *" ${RUN_STATUS} "* ]]; then
+        state="succeeded"
+      elif [[ -n "$RUN_STATUS" && "$soft_states" == *" ${RUN_STATUS} "* ]]; then
+        state="failed"
+        description="soft-mandatory policy failed: override in TFE"
+      else
+        state="failed"
+      fi
+      description+=", commit ${short_commit}"
+      jq -n \
+        --arg state "$state" \
+        --arg description "$description" \
+        --arg genre "$STATUS_GENRE" \
+        --arg name "$STATUS_NAME" \
+        --arg targetUrl "$RUN_LINK" \
+        '{state: $state, description: $description, context: {genre: $genre, name: $name}}
+         + (if $targetUrl == "" then {} else {targetUrl: $targetUrl} end)' >"$tmp/status.json"
+      api POST "$base/statuses?api-version=$api_version" "$tmp/status.json"
+      echo "Set PR status ${STATUS_GENRE}/${STATUS_NAME}: $state"
+    displayName: ${{ parameters.displayName }}
+    condition: and(${{ parameters.condition }}, eq(variables['Build.Reason'], 'PullRequest'))
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      COLLECTION_URI: $(System.CollectionUri)
+      PROJECT: $(System.TeamProject)
+      REPO_ID: $(Build.Repository.ID)
+      PR_ID: $(System.PullRequest.PullRequestId)
+      SOURCE_COMMIT: $(System.PullRequest.SourceCommitId)
+      SUMMARY_FILE: ${{ parameters.summaryFile }}
+      WORKSPACE: ${{ parameters.workspace }}
+      RUN_LINK: ${{ parameters.runLink }}
+      RUN_STATUS: ${{ parameters.runStatus }}
+      PLAN_ADD: ${{ parameters.add }}
+      PLAN_CHANGE: ${{ parameters.change }}
+      PLAN_DESTROY: ${{ parameters.destroy }}
+      PLAN_LOG_FILE: ${{ parameters.planLogFile }}
+      INCLUDE_PLAN_LOG: ${{ parameters.includePlanLog }}
+      STATUS_GENRE: ${{ parameters.statusContextGenre }}
+      STATUS_NAME: ${{ parameters.statusContextName }}

@@ -1,0 +1,16 @@
+# Target template for the bad cases. Itself clean.
+parameters:
+  - name: name
+    type: string
+  - name: enabled
+    type: boolean
+    default: false
+  - name: retries
+    type: number
+    default: 1
+
+steps:
+  - script: |
+      set -euo pipefail
+      echo "name=${{ parameters.name }} enabled=${{ parameters.enabled }} retries=${{ parameters.retries }}"
+    displayName: Show parameters

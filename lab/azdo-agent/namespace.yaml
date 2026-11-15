@@ -1,0 +1,14 @@
+# Namespace for the lab Azure DevOps agent.
+# Pod Security: enforce "baseline" (the agent runs as root for apt in the lab,
+# which "restricted" would reject) and warn on "restricted", so the gap to a
+# production-grade pod stays visible on every apply.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: azdo-agents
+  labels:
+    app.kubernetes.io/part-of: tfc-workflow-azdo
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

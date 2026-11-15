@@ -1,0 +1,11 @@
+# tfci has no "workspace list" command, run show has no --format flag, and
+# --json is a command flag (meta.go), so it cannot go before the command.
+steps:
+  - bash: |
+      set -euo pipefail
+      tfci workspace list
+      tfci run show --run="$RUN_ID" --format=json
+      tfci --json run show --run="$RUN_ID"
+    displayName: Wrong tfci usage
+    env:
+      RUN_ID: $(RUN_ID)

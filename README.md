@@ -1,108 +1,124 @@
-# HCP Terraform Azure DevOps Workflows
+# tfc-workflow-azdo
 
-> **Azure DevOps equivalent of [hashicorp/tfc-workflows-github](https://github.com/hashicorp/tfc-workflows-github)**
+Azure DevOps pipeline templates for HCP Terraform and Terraform Enterprise (TFE). They drive the API-driven (CLI-driven) workflow through [tfci](https://github.com/hashicorp/tfc-workflows-tooling), the HashiCorp CLI that uploads configuration and creates, reads and applies runs.
 
-This repository provides Azure DevOps pipeline templates and reusable tasks for integrating with HCP Terraform (formerly Terraform Cloud). These templates implement the same best practices as HashiCorp's GitHub Actions workflows, adapted for Azure DevOps.
+- A pull request gets a speculative plan of its own code. The pipeline posts the plan summary to the PR as a thread and sets a PR status.
+- A merge to `main` uploads the code, creates a run, waits for an Azure DevOps environment approval, then applies that same run.
+- For production, `applyMethod: tfe` leaves the apply to a person in TFE: the pipeline plans with a plan-only token and the approver confirms the run in TFE, where they see the full plan and the policy results. The pipeline holds no apply token. See [setup.md](docs/setup.md#11-production-confirm-in-tfe).
+- The main pipeline prints the Terraform plan text in the job log (`showPlanLog`, on by default). On a PR it is off by default, because a PR author could print a secret workspace variable through it; turned on, the PR comment also carries a trimmed copy, collapsed. The plan shows every value not marked sensitive: see [security.md](docs/security.md#the-plan-text-in-logs-and-pr-comments).
 
-## 🚀 Quick Start
+The same templates work against HCP Terraform and a private TFE with a private CA, internal images and no inbound connectivity. Only parameters change.
 
-1. **Copy a pipeline template** from `pipeline-templates/` to your repository
-2. **Create variable group** `terraform-variables` in Azure DevOps Library  
-3. **Set up HCP Terraform** workspace with API token
-4. **Test** by creating a Pull Request
+## How it runs
 
-## 📁 Repository Structure
-
+```mermaid
+sequenceDiagram
+  participant Eng as Engineer
+  participant ADO as Azure DevOps
+  participant Agent as Self-hosted agent
+  participant TFE as HCP Terraform or TFE
+  Eng->>ADO: open or update a PR
+  Note over ADO: branch policy build validation queues speculative-run
+  Agent->>ADO: poll for the job, check out the PR
+  Note over Agent: job validate (no secrets): fmt, validate, tflint
+  Agent->>TFE: upload --speculative, get configuration_version_id
+  Agent->>TFE: run create --plan-only on that configuration version
+  TFE-->>Agent: run_id, run_status, plan_id (tfci waits for the plan)
+  Agent->>TFE: plan output, then the plan log (log-read-url)
+  Agent->>ADO: PR thread with the plan, and PR status (System.AccessToken)
+  Eng->>ADO: merge to main
+  Note over ADO: CI trigger queues apply-run
+  Agent->>TFE: upload, run create on that configuration version
+  Note over Agent,ADO: Apply stage waits for the environment approval
+  Agent->>TFE: run apply (tfci waits until applied)
 ```
-├── pipeline-templates/          # 📋 Starter pipeline templates
-│   ├── hcp-terraform.speculative-run.yml    # PR pipeline
-│   └── hcp-terraform.apply-run.yml          # Main branch pipeline
-├── tasks/                      # 🔧 Reusable task templates  
-│   ├── upload-configuration.yml # Upload config to HCP Terraform
-│   ├── create-run.yml          # Create runs
-│   ├── apply-run.yml           # Apply runs
-│   └── ...                     # Other task templates
-├── terraform/                  # 🧪 Example Terraform configuration
-├── examples/                   # 📚 Example setups
-└── docs/                       # 📖 Documentation
+
+With `applyMethod: tfe` the main pipeline stops after the plan. The run waits in TFE until an approver confirms and applies it there.
+
+## Quick start
+
+Reference this repository from your Terraform repository as a repository resource, pinned to a tag, and `extends` a pipeline template:
+
+```yaml
+resources:
+  repositories:
+    - repository: tfc
+      type: git
+      name: <Project>/tfc-workflow-azdo
+      ref: refs/tags/v2.0.0
+
+extends:
+  template: templates/pipelines/speculative-run.yml@tfc
+  parameters:
+    workspace: my-app-dev
+    organization: my-org
+    hostname: tfe.example.internal
+    pool:
+      name: tfe-agents
 ```
 
-## 🔄 Available Pipeline Templates
+The tag `v2.0.0` is created when this version is released. Until it exists, `ref: refs/tags/v2.0.0` does not resolve and the pipeline fails to start; pin a branch or commit for testing before then.
 
-### Speculative Run (Pull Request)
-**File**: `pipeline-templates/hcp-terraform.speculative-run.yml`
-- ✅ Triggers on Pull Requests
-- ✅ Plan-only runs (no apply)
-- ✅ Shows proposed changes for review
-- ✅ Comments results (when configured)
+`hostname` is required on both pipeline templates (`app.terraform.io` for HCP Terraform). Add a Required template check on the variable groups and the PR agent pool ([setup.md](docs/setup.md#10-required-template-checks)), so a PR cannot swap the pipeline for its own and use the plan token.
 
-### Apply Run (Main Branch)  
-**File**: `pipeline-templates/hcp-terraform.apply-run.yml`
-- ✅ Triggers on main branch pushes
-- ✅ Plan and apply infrastructure changes
-- ✅ Uses deployment environments for approvals
-- ✅ Automatic rollback on failures
+Full examples:
 
-## 🔧 Task Templates
+- [`examples/azure-pipelines.pr.yml`](examples/azure-pipelines.pr.yml): the PR pipeline (`speculative-run.yml`).
+- [`examples/azure-pipelines.main.yml`](examples/azure-pipelines.main.yml): the main pipeline (`apply-run.yml`).
+- [`examples/azure-pipelines.main-prod.yml`](examples/azure-pipelines.main-prod.yml): the production main pipeline (`apply-run.yml` with `applyMethod: tfe`): no environment, no apply token.
+- [`examples/smoke-test.yml`](examples/smoke-test.yml): a manual plan-only run that proves the agent, token and CA work.
 
-Reusable tasks that mirror HashiCorp's GitHub Actions:
+## What you need
 
-| Azure DevOps Task | GitHub Action Equivalent |
-|-------------------|-------------------------|
-| `tasks/upload-configuration.yml` | `hashicorp/tfc-workflows-github/actions/upload-configuration` |
-| `tasks/create-run.yml` | `hashicorp/tfc-workflows-github/actions/create-run` |
-| `tasks/apply-run.yml` | `hashicorp/tfc-workflows-github/actions/apply-run` |
-| `tasks/plan-output.yml` | `hashicorp/tfc-workflows-github/actions/plan-output` |
+- **A self-hosted agent** that reaches TFE and Azure DevOps. In `docker` mode (the default) it needs Docker, bash, jq and curl 7.76 or later. In `native` mode it needs `tfci` on the PATH, bash, jq and curl, plus `terraform` and `tflint` when validation is on.
+- **Two variable groups**: `tfc-plan` with a plan-permission team token and `tfc-apply` with an apply team token, each as the secret `TF_API_TOKEN`. With `applyMethod: tfe`, only `tfc-plan`, plus a TFE approvers team with apply permission.
+- **An environment** for the Apply stage, with an approval and a branch control check (not with `applyMethod: tfe`).
+- **A branch policy** with build validation, so PRs run the PR pipeline.
+- **Workspaces** using the CLI-driven workflow with Auto apply off.
 
-## ⚙️ Setup Requirements
+[docs/setup.md](docs/setup.md) walks through all of it in order.
 
-1. **Variable Group**: Create `terraform-variables` in Azure DevOps Library
-   - `TF_API_TOKEN` (secret) - HCP Terraform API token
-   - `TF_CLOUD_ORGANIZATION` - Your organization name  
-   - `TF_WORKSPACE` - Target workspace name
-   - `CONFIG_DIRECTORY` - Terraform config directory
+## Repository layout
 
-2. **Service Connection**: Docker Hub connection named `dockerhub`
+```text
+templates/
+  pipelines/speculative-run.yml   extends template for PR builds
+  pipelines/apply-run.yml         extends template for main: Plan stage, gated Apply stage
+  steps/tfci.yml                  runs any tfci command (docker or native mode)
+  steps/upload.yml                tfci upload, sets CONFIGURATION_VERSION_ID
+  steps/run-create.yml            tfci run create, sets RUN_ID, RUN_STATUS, PLAN_ID, PLAN_STATUS, RUN_LINK
+  steps/plan-output.yml           tfci plan output, writes a markdown summary
+  steps/plan-log.yml              the Terraform plan text from the TFE API, in the log and a trimmed file
+  steps/pr-comment.yml            PR thread and PR status through the Azure DevOps REST API
+  steps/run-apply.yml             tfci run apply
+  steps/validate.yml              terraform fmt, validate and tflint
+examples/                         consumer pipelines and the smoke test
+lab/azdo-agent/                   lab agent as a Kubernetes pod (native mode)
+tests/                            local checks, run with tests/run.sh
+docs/                             setup, security, reference, troubleshooting
+```
 
-3. **Environment**: Create `production` environment for apply approvals
+## Docs
 
-## 📖 Documentation
+| Doc | What it covers |
+| --- | --- |
+| [setup.md](docs/setup.md) | End-to-end setup checklist: tokens, variable groups, environment, branch policy, agents, smoke test |
+| [tfe-private-network.md](docs/tfe-private-network.md) | TFE with no inbound connectivity: agents inside the network, private CA, provider mirror |
+| [internal-registry.md](docs/internal-registry.md) | Mirroring and pinning the images, native-mode agent images, moving tfci versions |
+| [security.md](docs/security.md) | Threat model, token split, secret handling, residual risks |
+| [reference.md](docs/reference.md) | Every template's parameters and output variables, generated from the templates |
+| [troubleshooting.md](docs/troubleshooting.md) | Common failures with symptom, cause and fix |
+| [CHANGELOG.md](CHANGELOG.md) | Release notes |
+| [lab/azdo-agent/README.md](lab/azdo-agent/README.md) | The lab agent pod and its security model |
 
-- [📋 Setup Guide](docs/setup-guide.md) - Complete configuration walkthrough
-- [🔀 Migration Guide](docs/migration-guide.md) - Moving from GitHub Actions  
-- [🐛 Troubleshooting](docs/troubleshooting.md) - Common issues and solutions
-- [📚 Examples](examples/) - Example configurations and setups
+## Testing
 
-## 🔄 GitHub Actions Comparison
+```bash
+bash tests/run.sh
+```
 
-| Concept | GitHub Actions | Azure DevOps |
-|---------|----------------|---------------|
-| **Workflows** | `.github/workflows/` | `pipeline-templates/` |
-| **Actions** | `actions/` | `tasks/` |
-| **Secrets** | `${{ secrets.NAME }}` | `$(NAME)` |
-| **Variables** | `env:` | `variables:` |
-| **Triggers** | `on:` | `trigger:` / `pr:` |
+It runs the template checker and its self-tests, the PR comment test against a fake Azure DevOps API, the plan log test against a fake TFE over HTTPS, a render of both apply methods, the examples against the local templates, a check that the tfci v1.4.0 and v1.5.0 command manifests match, shellcheck on every script in the templates, `terraform fmt`, `validate` and `tflint` on the fixture, and a check that [docs/reference.md](docs/reference.md) matches the templates. It needs Ruby, shellcheck and Terraform; tflint is optional.
 
-## 🧪 Testing
+## What changed in v2
 
-This repository includes a simple Terraform configuration for testing:
-- Random string and integer resources
-- No real infrastructure costs
-- Perfect for validating your pipeline setup
-
-## 🤝 Contributing
-
-1. Fork this repository
-2. Create a feature branch  
-3. Test your changes with the example configuration
-4. Submit a pull request
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
----
-
-**Built with ❤️ for the Azure DevOps and Terraform community**
-
-> Based on HashiCorp's excellent [tfc-workflows-github](https://github.com/hashicorp/tfc-workflows-github) repository
+v2 is a rebuild. Runs now plan the PR's own code, tokens are split between plan and apply, TFE with a private CA and internal images is supported, and the v1 `pipeline-templates/` and `tasks/` folders are gone. See [CHANGELOG.md](CHANGELOG.md).

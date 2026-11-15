@@ -1,0 +1,7 @@
+# set -x prints every command, including ones that carry secrets.
+steps:
+  - script: |
+      set -euo pipefail
+      set -x
+      echo "tracing"
+    displayName: Tracing on

@@ -1,0 +1,5 @@
+# Passes an undeclared parameter and leaves out the required one.
+steps:
+  - template: templates/steps.yml
+    parameters:
+      nmae: typo

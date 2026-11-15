@@ -1,0 +1,252 @@
+# Print the human-readable Terraform plan in the pipeline log, and keep a
+# trimmed copy for the PR comment.
+#
+# tfci with --json sends plan logs to its own logger, which is off by default,
+# so without this step the pipeline shows only the counts and a run link.
+#
+# What it does:
+#   1. GET https://<hostname>/api/v2/plans/<planId> with the token.
+#   2. Reads data.attributes.log-read-url and fetches that URL WITHOUT the
+#      Authorization header.
+#   3. Turns TFE's JSON log events into their readable @message lines,
+#      strips ANSI colour codes and other control characters, and breaks up
+#      every `##` in the log text (`##` becomes `# #`, repeated until none is
+#      left), so no Azure DevOps logging command survives in any spelling:
+#      `##vso[`, `##VSO[`, `##[error]`, or `##` followed by an invisible
+#      character. A value in the plan cannot set a variable or fail the build.
+#   4. Prints the whole log inside a collapsed `##[group]Terraform plan`.
+#   5. Writes the first maxLines lines, plus a "trimmed" line when it cut any,
+#      to outputFile (default $(Agent.TempDirectory)/plan-log.txt). pr-comment.yml
+#      reads that file.
+#
+# Token: the pipeline variable named by tokenVariable reaches the script
+# through env: only. curl gets the header through its config on stdin
+# (`curl -q -K -`), so the token is never on a command line and never printed.
+# The log-read-url is never printed either.
+#
+# CA: caBundle (absolute path to a PEM file) is passed to curl as --cacert for
+# the API call, and for the log URL when it is on the same host as hostname
+# (compared in lower case, with a :443 port dropped). curl's --cacert REPLACES
+# the system roots, unlike tfci's caBundle, which adds to them. When the log
+# URL is on another host (HCP Terraform serves logs from a separate host),
+# curl uses the system roots. Empty caBundle: system roots.
+#
+# Redirects: the log fetch does not let curl follow redirects (no -L), so the
+# private CA is never used for a host it was not meant for. A 3xx is followed
+# by hand, once: the Location must be a plain https URL, and it gets the CA
+# chosen by the same host rule. A second redirect gives up with a warning.
+#
+# Failures: a bad planId, hostname, maxLines or caBundle fails the step. A
+# failure to fetch the log (HTTP error, expired URL, empty log) logs a warning
+# and ends the step as "succeeded with issues": the plan text is for reading,
+# it never decides whether a run is applied.
+#
+# Sensitive values: the plan log masks values marked sensitive, but it shows
+# every other attribute value in clear text. Anyone who can read the pipeline
+# log, or the PR when pr-comment.yml includes the log, sees them. Turn it off
+# with the pipeline parameter showPlanLog: false. See docs/security.md.
+#
+# API reference: Terraform Enterprise API, Plans, "Show a plan"
+# (GET /plans/:id); the sample response carries data.attributes.log-read-url.
+#   https://developer.hashicorp.com/terraform/enterprise/api-docs/plans#show-a-plan
+# Assumption, to confirm in the lab: the log-read-url is a short-lived signed
+# URL that needs no Authorization header. The API page shows the attribute in
+# its sample response only and does not say how long the URL is valid.
+parameters:
+  - name: planId
+    type: string
+  # Connection parameters. Same meaning as in tfci.yml, except caBundle (see
+  # the header). hostname is required, so the token only goes where it is told.
+  - name: hostname
+    type: string
+  - name: caBundle
+    type: string
+    default: ''
+  - name: tokenVariable
+    type: string
+    default: TF_API_TOKEN
+  - name: maxLines
+    type: number
+    default: 300
+  - name: outputFile
+    type: string
+    default: $(Agent.TempDirectory)/plan-log.txt
+  - name: condition
+    type: string
+    default: succeeded()
+  - name: displayName
+    type: string
+    default: Terraform plan log
+
+steps:
+  - bash: |
+      set -euo pipefail
+
+      fail() {
+        echo "##vso[task.logissue type=error]plan-log: $1"
+        exit 1
+      }
+      # The plan text is for reading only: a fetch problem never fails the job.
+      give_up() {
+        echo "##vso[task.logissue type=warning]plan-log: $1"
+        echo "##vso[task.complete result=SucceededWithIssues;]plan log not shown"
+        exit 0
+      }
+      # A value for curl's config file: in double quotes, \ and " escaped.
+      cfg_quote() {
+        local v="${1//\\/\\\\}"
+        printf '"%s"' "${v//\"/\\\"}"
+      }
+
+      if [[ -n "$OUTPUT_FILE" ]]; then rm -f "$OUTPUT_FILE"; fi
+      # The value is not echoed: it comes from an earlier step's output.
+      if [[ ! "$PLAN_ID" =~ ^plan-[A-Za-z0-9]+$ ]]; then
+        fail "planId is not a plan ID (plan- followed by letters and digits)"
+      fi
+      if [[ ! "$TFE_HOSTNAME" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+        fail "hostname '$TFE_HOSTNAME' is not a host name (host or host:port, no scheme)"
+      fi
+      if [[ ! "$MAX_LINES" =~ ^[0-9]+$ || "$MAX_LINES" -lt 1 ]]; then
+        fail "maxLines '$MAX_LINES' must be a whole number above 0"
+      fi
+      if [[ -z "$OUTPUT_FILE" ]]; then
+        fail "outputFile is empty"
+      fi
+      # An undefined pipeline variable is passed through as the literal text "$(NAME)".
+      # shellcheck disable=SC2016 # literal "$(" on purpose
+      if [[ -z "${TFE_TOKEN:-}" || "$TFE_TOKEN" == '$('* ]]; then
+        fail "the token variable '$TOKEN_VARIABLE' is empty or not defined"
+      fi
+      ca_args=()
+      if [[ -n "$CA_BUNDLE" ]]; then
+        if [[ "$CA_BUNDLE" != /* || ! -f "$CA_BUNDLE" ]]; then
+          fail "caBundle '$CA_BUNDLE' must be an absolute path to an existing file"
+        fi
+        ca_args=(--cacert "$CA_BUNDLE")
+      fi
+
+      tmp="$(mktemp -d)"
+      trap 'rm -rf "$tmp"' EXIT
+
+      # 1. The plan, with the token. -q first: ignore any .curlrc on the agent.
+      api_url="https://$TFE_HOSTNAME/api/v2/plans/$PLAN_ID"
+      rc=0
+      code="$(
+        {
+          printf 'header = %s\n' "$(cfg_quote "Authorization: Bearer $TFE_TOKEN")"
+          printf 'url = %s\n' "$(cfg_quote "$api_url")"
+        } | curl -q -K - -sS --proto '=https' --max-time 60 ${ca_args[@]+"${ca_args[@]}"} \
+          -H 'Accept: application/vnd.api+json' -o "$tmp/plan.json" -w '%{http_code}' 2>"$tmp/curl.err"
+      )" || rc=$?
+      if [[ $rc -ne 0 ]]; then
+        cat "$tmp/curl.err" >&2
+        give_up "GET $api_url failed (curl exit $rc). See the TLS and network notes in docs/troubleshooting.md."
+      fi
+      case "$code" in
+        200) ;;
+        401 | 403 | 404) give_up "GET $api_url returned HTTP $code: the token cannot read this plan, or it does not exist." ;;
+        *) give_up "GET $api_url returned HTTP $code." ;;
+      esac
+
+      # 2. The log, from the signed URL, without the token.
+      log_url="$(jq -r '.data.attributes["log-read-url"] // empty' "$tmp/plan.json")"
+      if [[ -z "$log_url" ]]; then
+        give_up "plan $PLAN_ID has no log-read-url yet."
+      fi
+      # Host of a URL, lower case, with a :443 port dropped.
+      norm_host() {
+        local h="${1,,}"
+        printf '%s' "${h%:443}"
+      }
+      api_host="$(norm_host "$TFE_HOSTNAME")"
+      # fetch_log URL: sets code and location. Never prints the URL: it is signed.
+      fetch_log() {
+        local url="$1" rest host rc=0 out
+        local log_ca=()
+        if [[ "$url" != https://* || "$url" == *[[:space:][:cntrl:]]* ]]; then
+          give_up "plan $PLAN_ID has a log URL that is not a plain https URL."
+        fi
+        rest="${url#https://}"
+        host="$(norm_host "${rest%%[/?#]*}")"
+        if [[ "$host" == "$api_host" ]]; then
+          log_ca=(${ca_args[@]+"${ca_args[@]}"})
+        else
+          echo "The log is served by another host ($host): using the system CA roots for it."
+        fi
+        out="$(
+          printf 'url = %s\n' "$(cfg_quote "$url")" |
+            curl -q -K - -sS --proto '=https' --max-time 120 ${log_ca[@]+"${log_ca[@]}"} \
+              -o "$tmp/raw.log" -w '%{http_code} %{redirect_url}' 2>"$tmp/log.err"
+        )" || rc=$?
+        # curl's message is not printed: it could name the signed URL.
+        if [[ $rc -ne 0 ]]; then
+          give_up "fetching the plan log failed (curl exit $rc). The signed log URL may have expired: re-run this step."
+        fi
+        code="${out%% *}"
+        location="${out#* }"
+      }
+      fetch_log "$log_url"
+      if [[ "$code" == 3[0-9][0-9] ]]; then
+        if [[ -z "$location" ]]; then
+          give_up "fetching the plan log returned HTTP $code with no Location."
+        fi
+        echo "The plan log URL redirected (HTTP $code): following it once."
+        fetch_log "$location"
+        if [[ "$code" == 3[0-9][0-9] ]]; then
+          give_up "fetching the plan log redirected more than once (HTTP $code): not followed."
+        fi
+      fi
+      if [[ "$code" != 200 ]]; then
+        give_up "fetching the plan log returned HTTP $code. The signed log URL may have expired: re-run this step."
+      fi
+
+      # 3. Strip ANSI codes and control characters (keeping tab and newline),
+      # and break up every "##" so the log text cannot hold a logging command
+      # in any spelling. The loop repeats until no "##" is left ("###" needs
+      # two passes). awk ends the last line with a newline.
+      # TFE stores the plan log as structured JSON, one event per line. Print
+      # each event's human-readable "@message" (what TFE's UI shows); keep any
+      # line that is not such JSON (the "Terraform v..." header) as it is.
+      if ! jq -Rr '. as $l | (try fromjson catch null) as $j
+          | if ($j | type) == "object" and (($j["@message"] | type) == "string") then $j["@message"] else $l end' \
+          "$tmp/raw.log" >"$tmp/msg.log" 2>/dev/null; then
+        cp "$tmp/raw.log" "$tmp/msg.log"
+      fi
+      esc=$'\033'
+      LC_ALL=C sed -e "s/${esc}\[[0-9;?]*[A-Za-z]//g" "$tmp/msg.log" |
+        LC_ALL=C tr -d '\000-\010\013-\037\177' |
+        LC_ALL=C sed -e ':a' -e 's/##/# #/g' -e 'ta' |
+        LC_ALL=C awk '{ print }' >"$tmp/plan.log"
+      if [[ ! -s "$tmp/plan.log" ]]; then
+        give_up "the plan log for $PLAN_ID is empty. The plan may not have started, or its log was removed."
+      fi
+      # awk counts a last line with no newline too; wc -l would not.
+      total="$(LC_ALL=C awk 'END { print NR }' "$tmp/plan.log")"
+
+      # 4. The whole log, in a collapsed group.
+      echo "##[group]Terraform plan"
+      cat "$tmp/plan.log"
+      echo "##[endgroup]"
+
+      # 5. The trimmed copy.
+      mkdir -p "$(dirname "$OUTPUT_FILE")"
+      if [[ "$total" -gt "$MAX_LINES" ]]; then
+        {
+          head -n "$MAX_LINES" "$tmp/plan.log"
+          echo "... trimmed: first $MAX_LINES of $total lines, see the run in TFE for the full plan."
+        } >"$OUTPUT_FILE"
+        echo "Plan log: $total lines; first $MAX_LINES written to $OUTPUT_FILE"
+      else
+        cp "$tmp/plan.log" "$OUTPUT_FILE"
+        echo "Plan log: $total lines written to $OUTPUT_FILE"
+      fi
+    displayName: ${{ parameters.displayName }}
+    condition: ${{ parameters.condition }}
+    env:
+      TFE_TOKEN: $(${{ parameters.tokenVariable }})
+      TOKEN_VARIABLE: ${{ parameters.tokenVariable }}
+      TFE_HOSTNAME: ${{ parameters.hostname }}
+      CA_BUNDLE: ${{ parameters.caBundle }}
+      PLAN_ID: ${{ parameters.planId }}
+      MAX_LINES: ${{ parameters.maxLines }}
+      OUTPUT_FILE: ${{ parameters.outputFile }}

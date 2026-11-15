@@ -1,0 +1,144 @@
+# Create a run on a given configuration version and wait for the plan:
+# `tfci run create --json`.
+#
+# tfci blocks until the plan reaches a terminal state (planned, cost_estimated,
+# policy_checked, planned_and_finished, planned_and_saved with savePlan, ...)
+# and exits 1 when the run errors, is canceled or discarded, or
+# TF_MAX_TIMEOUT (maxTimeout) passes.
+#
+# Output variables (step name = the `name` parameter, default "run"):
+#   RUN_ID, RUN_STATUS, PLAN_ID, PLAN_STATUS, RUN_LINK
+# Same job:        $(run.RUN_ID)
+# Another job:     dependencies.<job>.outputs['run.RUN_ID']
+# Another stage:   stageDependencies.<stage>.<job>.outputs['run.RUN_ID']
+# The output step also runs when tfci failed, so a later step (for example a PR
+# comment with condition succeededOrFailed()) can still link the failed run.
+# It fails when RUN_ID is empty.
+#
+# configurationVersionId is required: without it the run would plan the
+# workspace's current code, not this build's. Pass
+# $(upload.CONFIGURATION_VERSION_ID) from upload.yml.
+#
+# message must not contain PR text, branch names or other user-controlled
+# values. The default names the build only.
+parameters:
+  - name: name
+    type: string
+    default: run
+  - name: displayName
+    type: string
+    default: Create run and wait for the plan
+  - name: workspace
+    type: string
+  - name: configurationVersionId
+    type: string
+  - name: planOnly
+    type: boolean
+    default: false
+  # A saved-plan run (tfci --save-plan). It plans and runs its checks at once,
+  # but does not lock the workspace or become its current run until it is
+  # applied (run_create.go, v1.4.0). It ends the plan in planned_and_saved.
+  - name: savePlan
+    type: boolean
+    default: false
+  - name: message
+    type: string
+    default: Azure DevOps build $(Build.BuildId)
+  # Connection parameters, passed through to tfci.yml unchanged. Same
+  # defaults as tfci.yml; hostname is required there too.
+  - name: mode
+    type: string
+    default: docker
+    values:
+      - docker
+      - native
+  - name: image
+    type: string
+    default: hashicorp/tfci:v1.4.0
+  - name: hostname
+    type: string
+  - name: organization
+    type: string
+  - name: caBundle
+    type: string
+    default: ''
+  - name: workingDirectory
+    type: string
+    default: $(System.DefaultWorkingDirectory)
+  - name: tokenVariable
+    type: string
+    default: TF_API_TOKEN
+  - name: maxTimeout
+    type: string
+    default: 1h
+  - name: logLevel
+    type: string
+    default: ''
+
+steps:
+  - bash: |
+      set -euo pipefail
+      if [[ ! "$CV_ID" =~ ^cv-[A-Za-z0-9]+$ ]]; then
+        echo "##vso[task.logissue type=error]run-create: configurationVersionId '$CV_ID' is not a configuration version ID (cv-...)"
+        exit 1
+      fi
+    name: ${{ parameters.name }}_check
+    displayName: ${{ parameters.displayName }} (check input)
+    env:
+      CV_ID: ${{ parameters.configurationVersionId }}
+
+  - template: tfci.yml
+    parameters:
+      name: ${{ parameters.name }}_tfci
+      displayName: ${{ parameters.displayName }}
+      command: run create
+      args: --plan-only=${{ parameters.planOnly }} --save-plan=${{ parameters.savePlan }}
+      textArgs:
+        workspace: ${{ parameters.workspace }}
+        configuration_version: ${{ parameters.configurationVersionId }}
+        message: ${{ parameters.message }}
+      outputFile: $(Agent.TempDirectory)/tfci-${{ parameters.name }}.json
+      mode: ${{ parameters.mode }}
+      image: ${{ parameters.image }}
+      hostname: ${{ parameters.hostname }}
+      organization: ${{ parameters.organization }}
+      caBundle: ${{ parameters.caBundle }}
+      workingDirectory: ${{ parameters.workingDirectory }}
+      tokenVariable: ${{ parameters.tokenVariable }}
+      maxTimeout: ${{ parameters.maxTimeout }}
+      logLevel: ${{ parameters.logLevel }}
+
+  - bash: |
+      set -euo pipefail
+      if [[ ! -s "$TFCI_OUT" ]]; then
+        echo "##vso[task.logissue type=error]run-create: $TFCI_OUT is missing or empty"
+        exit 1
+      fi
+      field() { jq -r --arg k "$1" '.[$k] // empty' "$TFCI_OUT"; }
+      run_id="$(field run_id)"
+      if [[ ! "$run_id" =~ ^run-[A-Za-z0-9]+$ ]]; then
+        echo "##vso[task.logissue type=error]run-create: no valid run_id in $TFCI_OUT (got '$run_id')"
+        exit 1
+      fi
+      run_status="$(field run_status)"
+      plan_id="$(field plan_id)"
+      plan_status="$(field plan_status)"
+      run_link="$(field run_link)"
+      # Values come from TFE. A newline would start a new logging command.
+      for v in "$run_status" "$plan_id" "$plan_status" "$run_link"; do
+        if [[ "$v" == *[[:cntrl:]]* ]]; then
+          echo "##vso[task.logissue type=error]run-create: unexpected characters in tfci output"
+          exit 1
+        fi
+      done
+      echo "run $run_id: $run_status (plan $plan_id: $plan_status)"
+      echo "##vso[task.setvariable variable=RUN_ID;isOutput=true]$run_id"
+      echo "##vso[task.setvariable variable=RUN_STATUS;isOutput=true]$run_status"
+      echo "##vso[task.setvariable variable=PLAN_ID;isOutput=true]$plan_id"
+      echo "##vso[task.setvariable variable=PLAN_STATUS;isOutput=true]$plan_status"
+      echo "##vso[task.setvariable variable=RUN_LINK;isOutput=true]$run_link"
+    name: ${{ parameters.name }}
+    displayName: ${{ parameters.displayName }} (outputs)
+    condition: succeededOrFailed()
+    env:
+      TFCI_OUT: $(Agent.TempDirectory)/tfci-${{ parameters.name }}.json
