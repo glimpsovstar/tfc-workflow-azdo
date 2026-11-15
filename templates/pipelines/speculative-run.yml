@@ -4,8 +4,15 @@
 # One stage, two jobs:
 #   validate (optional, no variable group: it runs untrusted PR code), then
 #   plan: checkout, upload (speculative), run-create (plan only, on that
-#   configuration version), plan-output, plan-log (optional, on by default),
-#   pr-comment.
+#   configuration version), run-cancel (only when the job is cancelled),
+#   plan-output, plan-log (optional, on by default), pr-comment.
+#
+# Cancel: when the job is cancelled (by a user or the job timeout), run-cancel
+# finds the run on this build's configuration version and cancels or discards
+# it in TFE. The plan job sets cancelTimeoutInMinutes: 5 so it has time to run.
+# It uses the plan token, and TFE says cancel and discard need apply
+# permission, so it may only log a warning (docs/troubleshooting.md, "Job
+# cancelled: what happens to the TFE run").
 #
 # Plan text: off by default on PRs. With showPlanLog true, plan-log.yml prints
 # the Terraform plan in the job log and pr-comment.yml adds a trimmed copy to
@@ -143,6 +150,7 @@ stages:
         displayName: Speculative plan (${{ parameters.workspace }})
         pool: ${{ parameters.pool }}
         timeoutInMinutes: ${{ parameters.jobTimeoutInMinutes }}
+        cancelTimeoutInMinutes: 5  # time for run-cancel after a cancel (see run-cancel.yml)
         ${{ if eq(parameters.enableValidate, true) }}:
           dependsOn: validate
         variables:
@@ -177,6 +185,18 @@ stages:
               tokenVariable: ${{ parameters.tokenVariable }}
               maxTimeout: ${{ parameters.maxTimeout }}
               logLevel: ${{ parameters.logLevel }}
+
+          # Runs only when the job is cancelled: cancels or discards the run
+          # on this build's configuration version (run.RUN_ID is not set when
+          # run-create is killed).
+          - template: ../steps/run-cancel.yml
+            parameters:
+              configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
+              hostname: ${{ parameters.hostname }}
+              organization: ${{ parameters.organization }}
+              workspace: ${{ parameters.workspace }}
+              caBundle: ${{ parameters.caBundle }}
+              tokenVariable: ${{ parameters.tokenVariable }}
 
           - template: ../steps/plan-output.yml
             parameters:

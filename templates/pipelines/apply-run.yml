@@ -2,11 +2,22 @@
 #
 #   Stage Plan, job plan: checkout, validate (optional, off by default because
 #     the PR already validated), upload, run-create (a real run, a saved
-#     plan by default, not plan only), plan-output, plan-log (optional, on by
-#     default), then a gate step that logs what happens next.
+#     plan by default, not plan only), run-cancel (only when the job is
+#     cancelled), plan-output, plan-log (optional, on by default), then a gate
+#     step that logs what happens next.
 #   Stage Apply, deployment job apply on `environment`: waits for the
 #     environment's checks (approval), then applies the run from the Plan
-#     stage by its ID. It applies that run only, never a newer one.
+#     stage by its ID. It applies that run only, never a newer one. Then
+#     run-cancel on that run ID, only when the job is cancelled.
+#
+# Cancel: when a job is cancelled (by a user or the job timeout), run-cancel
+# cancels the TFE run if it is planning or applying, or discards it if it
+# waits for a person. Both jobs set cancelTimeoutInMinutes: 5 so it has time
+# to run. On success nothing is cancelled: in tfe mode the planned run waits
+# in TFE for a person, as designed. The Plan job holds the plan token, and TFE
+# says cancel and discard need apply permission, so there it may only log a
+# warning (docs/troubleshooting.md, "Job cancelled: what happens to the TFE
+# run").
 #
 # Apply method (applyMethod):
 #   pipeline (default)  as above: an Azure DevOps environment approval, then
@@ -220,6 +231,7 @@ stages:
         displayName: Plan (${{ parameters.workspace }})
         pool: ${{ parameters.pool }}
         timeoutInMinutes: ${{ parameters.jobTimeoutInMinutes }}
+        cancelTimeoutInMinutes: 5  # time for run-cancel after a cancel (see run-cancel.yml)
         variables:
           - group: ${{ parameters.planVariableGroup }}
         steps:
@@ -281,6 +293,18 @@ stages:
               tokenVariable: ${{ parameters.tokenVariable }}
               maxTimeout: ${{ parameters.maxTimeout }}
               logLevel: ${{ parameters.logLevel }}
+
+          # Runs only when the job is cancelled: cancels or discards the run
+          # on this build's configuration version (run.RUN_ID is not set when
+          # run-create is killed).
+          - template: ../steps/run-cancel.yml
+            parameters:
+              configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
+              hostname: ${{ parameters.hostname }}
+              organization: ${{ parameters.organization }}
+              workspace: ${{ parameters.workspace }}
+              caBundle: ${{ parameters.caBundle }}
+              tokenVariable: ${{ parameters.tokenVariable }}
 
           - template: ../steps/plan-output.yml
             parameters:
@@ -369,6 +393,7 @@ stages:
           displayName: Apply (${{ parameters.workspace }})
           pool: ${{ parameters.pool }}
           timeoutInMinutes: ${{ parameters.jobTimeoutInMinutes }}
+          cancelTimeoutInMinutes: 5  # time for run-cancel after a cancel (see run-cancel.yml)
           environment: ${{ parameters.environment }}
           # Job level, not stage level (stage level is unverified for this).
           variables:
@@ -393,3 +418,14 @@ stages:
                       tokenVariable: ${{ parameters.tokenVariable }}
                       maxTimeout: ${{ parameters.maxTimeout }}
                       logLevel: ${{ parameters.logLevel }}
+
+                  # Runs only when the job is cancelled: cancels the apply in
+                  # TFE, or discards the run if it still waits.
+                  - template: ../steps/run-cancel.yml
+                    parameters:
+                      runId: $(RUN_ID)
+                      hostname: ${{ parameters.hostname }}
+                      organization: ${{ parameters.organization }}
+                      workspace: ${{ parameters.workspace }}
+                      caBundle: ${{ parameters.caBundle }}
+                      tokenVariable: ${{ parameters.tokenVariable }}

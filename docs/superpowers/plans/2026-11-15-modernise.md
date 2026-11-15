@@ -164,3 +164,18 @@ tfci with `--json` sends plan logs to its internal logger, off by default, so th
 - [x] Implement `plan-log.yml`, `pr-comment.yml` changes, wire into both pipelines.
 - [x] Docs: security (what the log exposes, how to turn it off), troubleshooting (empty log, expired URL), `reference.md` regenerated, README, CHANGELOG.
 - [x] `bash tests/run.sh` passes.
+
+### Task 12: Cancel the TFE run when the Azure DevOps job is cancelled
+
+When a job is cancelled (by a user or a job timeout), the TFE run it started keeps going. The step running `tfci run create` is killed before tfci prints its JSON, so `run.RUN_ID` is never set.
+
+**Files:** Create `templates/steps/run-cancel.yml`, `tests/run_cancel_test.sh`. Modify both pipelines, `tests/run.sh`, `tests/apply_method_test.rb`, `tests/gen_reference.rb`, `docs/{troubleshooting,security,reference}.md`, `README.md`, `CHANGELOG.md`.
+
+**Interfaces:**
+- `run-cancel.yml` parameters: `hostname` (required), `organization`, `workspace`, `caBundle`, `tokenVariable`, `configurationVersionId`, `runId` (optional), `condition` (default `canceled()`), `displayName`. With a valid `runId` it acts on that run; otherwise it finds the newest run in the workspace on `configurationVersionId`. It cancels when `attributes.actions.is-cancelable`, discards when `is-discardable`, and otherwise logs that the run has finished. curl `-K -` with the header on stdin, `--max-time 20` per call, `--cacert` when `caBundle` is set. API errors log a warning with the HTTP status and exit 0.
+- Pipelines: `run-cancel` after `run-create` in `speculative-run.yml` and in the `apply-run.yml` Plan stage (`configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)`), and after `run-apply` in the Apply stage (`runId: $(RUN_ID)`). Every job that holds a cancel step sets `cancelTimeoutInMinutes: 5`.
+
+- [x] Tests first: `run_cancel_test.sh` with a fake TFE (WEBrick over HTTPS, test CA): lookup by configuration version, cancel, discard, finished, no run, `runId` given, API 500, token never printed and Authorization sent, bad IDs rejected before any request. Wiring checks in `apply_method_test.rb`. Wire into `run.sh`.
+- [x] Implement `run-cancel.yml` and wire it into both pipelines.
+- [x] Docs: troubleshooting "Job cancelled: what happens to the TFE run", security, README, CHANGELOG v2.0.1, `reference.md` regenerated.
+- [x] `bash tests/run.sh` passes.

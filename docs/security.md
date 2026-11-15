@@ -23,6 +23,8 @@ There are two variable groups with two team tokens ([setup.md](setup.md#1-team-t
 - `tfc-plan`: a team with **plan** permission. Used by PR builds and the Plan stage. A leaked plan token can queue plans, not apply them.
 - `tfc-apply`: the apply token. Only the Apply stage of `apply-run.yml` loads it. The group has pipeline permission for the main pipeline only, an approval, and a branch control check on `refs/heads/main`. The Apply stage also runs on an environment with its own approval and branch control.
 
+When a job is cancelled, `run-cancel.yml` cancels or discards the TFE run with the token the job already holds; it never loads another one. TFE needs apply permission to cancel or discard, so in a Plan job (plan token) it may only log a warning and leave the run for a person to cancel in TFE ([troubleshooting.md](troubleshooting.md#job-cancelled-what-happens-to-the-tfe-run)). The plan token is not widened for this.
+
 PR code never runs in a job that holds the apply token. In `speculative-run.yml` the `validate` job, which runs PR code on the agent, has **no variable group at all**, so no token exists in that job. The `plan` job loads `tfc-plan` and only uploads files and calls the TFE API.
 
 ## Production: confirm in TFE

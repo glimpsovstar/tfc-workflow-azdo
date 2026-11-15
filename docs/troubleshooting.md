@@ -54,6 +54,37 @@ If `terraform init` in the validate job fails with the same x509 error, the prov
 
 **Fix.** Keep `jobTimeoutInMinutes` above `maxTimeout`, with room for the upload and the other steps. With `maxTimeout: 2h`, set `jobTimeoutInMinutes: 150` or more.
 
+A timeout cancels the job, so the TFE run is handled as in [Job cancelled: what happens to the TFE run](#job-cancelled-what-happens-to-the-tfe-run).
+
+## Job cancelled: what happens to the TFE run
+
+**Symptom.** A job was cancelled (by a person, or by the job timeout) while a TFE run was going. The step `Cancel the TFE run (job cancelled)` runs at the end of the job.
+
+**What happens.** Cancelling the job kills the step that is running. If that is `Create run and wait for the plan`, tfci is killed before it prints the run ID, but the run in TFE keeps going. The step `run-cancel.yml` runs only on cancel (`condition: canceled()`) and:
+
+1. Finds the run. In a Plan job it looks up the workspace, lists its last 20 runs (speculative runs included) and takes the newest run on this build's configuration version. In the Apply job it uses the run ID from the Plan stage.
+2. Asks TFE what the run allows (`actions.is-cancelable`, `actions.is-discardable`). A run that is planning or applying is **cancelled**. A run that waits for a person (confirmation, a policy override, or its turn in the queue) is **discarded**. A finished run is left alone, and the step logs `it has finished, nothing to cancel`.
+3. Never fails the job. Any error is a warning with the HTTP status, and the step exits 0.
+
+The jobs set `cancelTimeoutInMinutes: 5`, which is how long Azure DevOps lets steps run after a cancel. Each API call is capped at 20 seconds.
+
+What is **not** cancelled:
+
+- A job cancelled before `Create run and wait for the plan` started: the step logs `no TFE run to cancel`.
+- A job cancelled after the run was created and planned, during a later step (plan summary, plan log, gate). The run is already planned. In `pipeline` mode it is a saved plan that does not block the workspace; in `tfe` mode it waits in TFE for a person to confirm or discard it, as it does after a successful pipeline.
+- A successful pipeline. In `tfe` mode the planned run waits in TFE for a person: that is the design, and nothing cancels it.
+
+Cancelling an apply interrupts Terraform part way, so some changes may already be made. Check the run and the workspace state in TFE before the next run.
+
+**Warnings you may see.**
+
+- `the token cannot cancel this run (TFE needs apply permission)`, HTTP 403 or 404. TFE documents that cancel and discard need permission to apply runs. A Plan job holds the plan token, which has plan permission only, so in a Plan job this warning is expected. Cancel or discard the run in TFE by hand (the warning names the run ID). The Apply job holds the apply token and can cancel. **Assumption, to confirm in the lab:** that a plan-permission team token is refused cancel and discard, including on a speculative run it queued itself.
+- `HTTP 409`: the run moved on between the read and the cancel (for example it finished). Check it in TFE.
+- `failed (curl exit 28)`: an API call took more than 20 seconds. Check the run in TFE.
+- `configurationVersionId is not a configuration version ID` or `runId is not a run ID`: a wiring mistake in a pipeline that calls the step itself. Nothing is sent.
+
+**Fix.** Open the workspace in TFE, find the run (its message names the Azure DevOps build), and cancel or discard it if it is still going. To let the Plan job cancel by itself, the plan token would need apply permission, which removes the point of split tokens ([security.md](security.md#split-tokens)); the templates do not do that.
+
 ## The Apply stage is skipped
 
 **Symptom.** The main pipeline succeeds, the Apply stage shows as skipped, and nothing is applied.

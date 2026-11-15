@@ -1,0 +1,243 @@
+# Cancel or discard the TFE run this job started, when the Azure DevOps job is
+# cancelled (by a user or by the job timeout).
+#
+# Why: cancelling the job kills the step that runs `tfci run create`, but the
+# TFE run carries on. tfci is killed before it prints its JSON, so run.RUN_ID
+# is never set: the run has to be found another way.
+#
+# What it does (condition default canceled(), so it runs only on cancel):
+#   1. Find the run.
+#      - runId set (a run- ID, as in the Apply stage): use it, and read it
+#        with GET /api/v2/runs/<runId>.
+#      - runId empty: GET /api/v2/organizations/<org>/workspaces/<workspace>
+#        for the workspace ID, then
+#        GET /api/v2/workspaces/<ws-id>/runs?page[size]=20&filter[operation]=...
+#        and pick the newest run (by created-at) whose
+#        relationships.configuration-version.data.id is configurationVersionId.
+#        filter[operation] lists every operation, plan_only included, because
+#        TFE leaves plan_only (speculative) runs out of the list by default.
+#      Every ID is checked with a regex before it goes into a URL (^cv-,
+#      ^run-, ^ws-), and the organization and workspace names are URL-encoded.
+#   2. Act on the run's attributes.actions, not on a list of statuses:
+#      - is-cancelable: POST /api/v2/runs/<id>/actions/cancel (the run is
+#        planning or applying).
+#      - is-discardable: POST /api/v2/runs/<id>/actions/discard (the run waits
+#        for a person: confirmation, a policy override, or its turn).
+#      - neither: the run has finished. Logged, nothing sent.
+#      Both POSTs carry {"comment":"Azure DevOps job cancelled (build <BuildId>)"}.
+#
+# Quiet on failure: the job is already cancelled, so this step never fails it.
+# A bad parameter, a missing token, a curl error or an HTTP error logs a
+# warning (with the HTTP status, never the token) and exits 0. No run found
+# logs "no TFE run to cancel" and exits 0.
+#
+# Time: each curl call has --max-time 20, and the step makes at most four. Azure
+# DevOps gives steps that run after a cancel only the job's
+# cancelTimeoutInMinutes (default 5, range 1 to 35790); the pipelines set it
+# to 5 explicitly on every job that holds this step.
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/phases?view=azure-devops#timeouts
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/conditions?view=azure-devops#condition-outcomes-when-a-build-is-canceled
+#
+# Token: the pipeline variable named by tokenVariable reaches the script
+# through env: only. curl gets the header through its config on stdin
+# (`curl -q -K -`), so the token is never on a command line and never printed.
+# It is whatever token the job holds: the plan token in a Plan job, the apply
+# token in the Apply job. TFE says cancel and discard need permission to apply
+# runs, so a plan-only token is expected to get an error here (a warning, exit
+# 0). Assumption, to confirm in the lab: what a plan-permission team token gets
+# back for cancel and discard, including on its own speculative run.
+#
+# CA: as in plan-log.yml. caBundle (absolute path to a PEM file) is passed to
+# curl as --cacert, which REPLACES the system roots. Empty: system roots.
+#
+# API reference: Terraform Enterprise API, Runs.
+#   https://developer.hashicorp.com/terraform/enterprise/api-docs/run#cancel-a-run
+#     POST /runs/:run_id/actions/cancel, optional body comment; 202 queued,
+#     409 "not planning or applying"; "Canceling a run requires permission to
+#     apply runs for the workspace."
+#   https://developer.hashicorp.com/terraform/enterprise/api-docs/run#discard-a-run
+#     POST /runs/:run_id/actions/discard, optional body comment; 202 queued,
+#     409 "not paused for confirmation or priority"; needs apply permission.
+#   https://developer.hashicorp.com/terraform/enterprise/api-docs/run#list-runs-in-a-workspace
+#     GET /workspaces/:workspace_id/runs, page[size] (default 20),
+#     filter[operation] (comma-separated); plan_only runs excluded by default.
+#     Run objects carry attributes.actions.is-cancelable and is-discardable,
+#     attributes.created-at and relationships.configuration-version.
+#   https://developer.hashicorp.com/terraform/enterprise/api-docs/workspaces#show-workspace
+#     GET /organizations/:organization_name/workspaces/:name
+parameters:
+  # Connection parameters. Same meaning as in plan-log.yml. hostname is
+  # required, so the token only goes where it is told.
+  - name: hostname
+    type: string
+  - name: organization
+    type: string
+    default: ''
+  - name: workspace
+    type: string
+    default: ''
+  - name: caBundle
+    type: string
+    default: ''
+  - name: tokenVariable
+    type: string
+    default: TF_API_TOKEN
+  - name: configurationVersionId
+    type: string
+    default: ''
+  - name: runId
+    type: string
+    default: ''
+  - name: condition
+    type: string
+    default: canceled()
+  - name: displayName
+    type: string
+    default: Cancel the TFE run (job cancelled)
+
+steps:
+  - bash: |
+      set -euo pipefail
+
+      # Never fail the cancelled job: warn and stop.
+      give_up() {
+        echo "##vso[task.logissue type=warning]run-cancel: $1"
+        exit 0
+      }
+      # A value for curl's config file: in double quotes, \ and " escaped.
+      cfg_quote() {
+        local v="${1//\\/\\\\}"
+        printf '"%s"' "${v//\"/\\\"}"
+      }
+      # An undefined pipeline variable is passed through as the literal text "$(NAME)".
+      unset_macro() {
+        # shellcheck disable=SC2016 # literal "$(" on purpose
+        [[ -z "$1" || "$1" == '$('* ]]
+      }
+
+      if [[ ! "$TFE_HOSTNAME" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+        give_up "hostname '$TFE_HOSTNAME' is not a host name (host or host:port, no scheme)"
+      fi
+      # IDs come from earlier steps; a bad one is not echoed.
+      run_id=""
+      if ! unset_macro "$RUN_ID_IN"; then
+        if [[ ! "$RUN_ID_IN" =~ ^run-[A-Za-z0-9]+$ ]]; then
+          give_up "runId is not a run ID (run- followed by letters and digits): nothing sent"
+        fi
+        run_id="$RUN_ID_IN"
+      elif unset_macro "$CV_ID"; then
+        echo "No configuration version was uploaded and no run ID is known: no TFE run to cancel."
+        exit 0
+      elif [[ ! "$CV_ID" =~ ^cv-[A-Za-z0-9]+$ ]]; then
+        give_up "configurationVersionId is not a configuration version ID (cv- followed by letters and digits): nothing sent"
+      elif [[ -z "$TFE_ORGANIZATION" || -z "$TFE_WORKSPACE" ]]; then
+        give_up "organization and workspace are needed to find the run by configuration version"
+      fi
+      if unset_macro "${TFE_TOKEN:-}"; then
+        give_up "the token variable '$TOKEN_VARIABLE' is empty or not defined"
+      fi
+      ca_args=()
+      if [[ -n "$CA_BUNDLE" ]]; then
+        if [[ "$CA_BUNDLE" != /* || ! -f "$CA_BUNDLE" ]]; then
+          give_up "caBundle '$CA_BUNDLE' must be an absolute path to an existing file"
+        fi
+        ca_args=(--cacert "$CA_BUNDLE")
+      fi
+      build=""
+      if [[ "${BUILD_ID:-}" =~ ^[0-9]+$ ]]; then build=" (build $BUILD_ID)"; fi
+
+      tmp="$(mktemp -d)"
+      trap 'rm -rf "$tmp"' EXIT
+      base="https://$TFE_HOSTNAME/api/v2"
+
+      # api METHOD PATH OUT [BODY]: sets code. -q first: ignore any .curlrc.
+      api() {
+        local method="$1" path="$2" out="$3" body="${4:-}" rc=0
+        local data=()
+        if [[ -n "$body" ]]; then
+          data=(-H 'Content-Type: application/vnd.api+json' --data-binary "@$body")
+        fi
+        code="$(
+          {
+            printf 'header = %s\n' "$(cfg_quote "Authorization: Bearer $TFE_TOKEN")"
+            printf 'url = %s\n' "$(cfg_quote "$base$path")"
+          } | curl -q -K - -sS --proto '=https' --max-time 20 ${ca_args[@]+"${ca_args[@]}"} \
+            -X "$method" -H 'Accept: application/vnd.api+json' ${data[@]+"${data[@]}"} \
+            -o "$out" -w '%{http_code}' 2>"$tmp/curl.err"
+        )" || rc=$?
+        if [[ $rc -ne 0 ]]; then
+          cat "$tmp/curl.err" >&2
+          give_up "$method $base$path failed (curl exit $rc). The TFE run may still be going: check it in TFE."
+        fi
+      }
+
+      # 1. Find the run.
+      if [[ -n "$run_id" ]]; then
+        api GET "/runs/$run_id" "$tmp/run.json"
+        case "$code" in
+          200) ;;
+          404) give_up "GET /runs/$run_id returned HTTP 404: the run does not exist, or the token cannot read it." ;;
+          *) give_up "GET /runs/$run_id returned HTTP $code. Check the run in TFE." ;;
+        esac
+        jq '.data' "$tmp/run.json" >"$tmp/pick.json"
+      else
+        org_enc="$(jq -rn --arg v "$TFE_ORGANIZATION" '$v | @uri')"
+        ws_enc="$(jq -rn --arg v "$TFE_WORKSPACE" '$v | @uri')"
+        api GET "/organizations/$org_enc/workspaces/$ws_enc" "$tmp/ws.json"
+        if [[ "$code" != 200 ]]; then
+          give_up "GET workspace returned HTTP $code. The TFE run for this job may still be going: check the workspace in TFE."
+        fi
+        ws_id="$(jq -r '.data.id // empty' "$tmp/ws.json")"
+        if [[ ! "$ws_id" =~ ^ws-[A-Za-z0-9]+$ ]]; then
+          give_up "the workspace response has no workspace ID (ws-...)."
+        fi
+        ops="plan_only,plan_and_apply,save_plan,refresh_only,destroy,empty_apply"
+        api GET "/workspaces/$ws_id/runs?page%5Bsize%5D=20&filter%5Boperation%5D=$ops" "$tmp/runs.json"
+        if [[ "$code" != 200 ]]; then
+          give_up "GET /workspaces/$ws_id/runs returned HTTP $code. The TFE run for this job may still be going: check the workspace in TFE."
+        fi
+        jq --arg cv "$CV_ID" '[.data[]? | select(.relationships["configuration-version"].data.id? == $cv)]
+          | sort_by(.attributes["created-at"] // "") | last // empty' "$tmp/runs.json" >"$tmp/pick.json"
+        if [[ ! -s "$tmp/pick.json" ]]; then
+          echo "No run on configuration version $CV_ID in the last 20 runs: no TFE run to cancel."
+          exit 0
+        fi
+        run_id="$(jq -r '.id // empty' "$tmp/pick.json")"
+        if [[ ! "$run_id" =~ ^run-[A-Za-z0-9]+$ ]]; then
+          give_up "the matching run has no run ID (run-...)."
+        fi
+      fi
+
+      # 2. Act on what TFE says the run allows.
+      status="$(jq -r '.attributes.status // "unknown"' "$tmp/pick.json" | tr -cd 'A-Za-z0-9_')"
+      cancelable="$(jq -r '.attributes.actions["is-cancelable"] == true' "$tmp/pick.json")"
+      discardable="$(jq -r '.attributes.actions["is-discardable"] == true' "$tmp/pick.json")"
+      if [[ "$cancelable" == true ]]; then
+        action=cancel
+      elif [[ "$discardable" == true ]]; then
+        action=discard
+      else
+        echo "Run $run_id is $status: it has finished, nothing to cancel."
+        exit 0
+      fi
+      jq -n --arg c "Azure DevOps job cancelled$build" '{comment: $c}' >"$tmp/body.json"
+      echo "Run $run_id is $status: asking TFE to $action it."
+      api POST "/runs/$run_id/actions/$action" "$tmp/action.json" "$tmp/body.json"
+      case "$code" in
+        200 | 202) echo "TFE accepted the $action request for run $run_id." ;;
+        409) echo "TFE refused to $action run $run_id (HTTP 409): it moved on, check it in TFE." ;;
+        403 | 404) give_up "POST $action for run $run_id returned HTTP $code: the token cannot $action this run (TFE needs apply permission). Cancel or discard it in TFE." ;;
+        *) give_up "POST $action for run $run_id returned HTTP $code. Cancel or discard it in TFE." ;;
+      esac
+    displayName: ${{ parameters.displayName }}
+    condition: ${{ parameters.condition }}
+    env:
+      TFE_TOKEN: $(${{ parameters.tokenVariable }})
+      TOKEN_VARIABLE: ${{ parameters.tokenVariable }}
+      TFE_HOSTNAME: ${{ parameters.hostname }}
+      TFE_ORGANIZATION: ${{ parameters.organization }}
+      TFE_WORKSPACE: ${{ parameters.workspace }}
+      CA_BUNDLE: ${{ parameters.caBundle }}
+      CV_ID: ${{ parameters.configurationVersionId }}
+      RUN_ID_IN: ${{ parameters.runId }}
+      BUILD_ID: $(Build.BuildId)
