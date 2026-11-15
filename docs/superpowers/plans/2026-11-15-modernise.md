@@ -43,11 +43,11 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 **Interfaces:**
 - Produces: `tests/run.sh` exits 0 only when every check passes; `check_templates.rb <dir>` prints `file:line rule message` per violation.
 
-- [ ] Write `check_templates.rb` rules: yaml-parse, param-crosscheck, no-macro-in-bool-param, no-template-if-in-script, no-parent-template-path, no-latest-image, no-secret-macro-in-script, strict-bash, tfci-command-exists (reads the manifest), no-user-macro-in-script (`System.PullRequest.*`, `Build.SourceBranch*`, `Build.RequestedFor`).
-- [ ] Generate `tfci-v1.4.0-commands.txt` and `tfci-v1.5.0-commands.txt` from tfci source at both tags (`cli.go` commands, each command's `f.*Var` flags, plus global `--json --hostname --organization --token`). Record the source URL and tag at the top. A test asserts the two manifests list the same commands and flags (verified 2026-11-15: v1.5.0 changes only Go and dependencies), so moving the default image to v1.5.0 is a one-line change.
-- [ ] Run against the current `tasks/` and `pipeline-templates/`: expect failures for `--format=json`, `workspace list`, `:latest`, `$(TF_API_TOKEN)` in scripts, `${{ if` in scripts, missing `set -euo pipefail`. Save the output in the commit message body.
-- [ ] `tests/run.sh`: python check, shellcheck on extracted scripts, `terraform fmt -check`, `validate`, `tflint` on the fixture.
-- [ ] Commit: `Test harness that catches the review's defect classes; clean up generator script and sample`.
+- [x] Write `check_templates.rb` rules: yaml-parse, param-crosscheck, no-macro-in-bool-param, no-template-if-in-script, no-parent-template-path, no-latest-image, no-secret-macro-in-script, strict-bash, tfci-command-exists (reads the manifest), no-user-macro-in-script (`System.PullRequest.*`, `Build.SourceBranch*`, `Build.RequestedFor`).
+- [x] Generate `tfci-v1.4.0-commands.txt` and `tfci-v1.5.0-commands.txt` from tfci source at both tags (`cli.go` commands, each command's `f.*Var` flags, plus global `--json --hostname --organization --token`). Record the source URL and tag at the top. A test asserts the two manifests list the same commands and flags (verified 2026-11-15: v1.5.0 changes only Go and dependencies), so moving the default image to v1.5.0 is a one-line change.
+- [x] Run against the current `tasks/` and `pipeline-templates/`: expect failures for `--format=json`, `workspace list`, `:latest`, `$(TF_API_TOKEN)` in scripts, `${{ if` in scripts, missing `set -euo pipefail`. Save the output in the commit message body.
+- [x] `tests/run.sh`: python check, shellcheck on extracted scripts, `terraform fmt -check`, `validate`, `tflint` on the fixture.
+- [x] Commit: `Test harness that catches the review's defect classes; clean up generator script and sample`.
 
 ### Task 2: tfci step wrapper and run steps
 
@@ -60,10 +60,10 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 - `run-apply.yml`: params `runId`, `comment`. Fails on non-zero tfci exit.
 - `plan-output.yml`: params `planId`. Writes `$(Agent.TempDirectory)/plan-summary.md` and outputs `ADD`, `CHANGE`, `DESTROY`.
 
-- [ ] Tests first: add fixture YAML under `tests/cases/` that misuse each step (missing configurationVersionId, wrong flag) and assert the checker flags them.
-- [ ] Implement. Docker mode mounts the working directory to `/tfci/workspace` and the CA to `/etc/ssl/certs/tfe-ca.pem` with `SSL_CERT_FILE` set. Native mode sets `SSL_CERT_FILE` to `caBundle`.
-- [ ] `tests/run.sh` passes.
-- [ ] Commit.
+- [x] Tests first: add fixture YAML under `tests/cases/` that misuse each step (missing configurationVersionId, wrong flag) and assert the checker flags them.
+- [x] Implement. Docker mode mounts the working directory to `/tfci/workspace` and the CA to `/etc/ssl/certs/tfe-ca.pem` with `SSL_CERT_FILE` set. Native mode sets `SSL_CERT_FILE` to `caBundle`.
+- [x] `tests/run.sh` passes.
+- [x] Commit.
 
 ### Task 3: PR comment step
 
@@ -71,9 +71,9 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 
 **Interfaces:** params `summaryFile`, `runLink`, `runStatus`, `statusContext` (default `terraform/tfe-plan`). Uses `System.AccessToken`, `System.CollectionUri`, `System.TeamProject`, `Build.Repository.ID`, `System.PullRequest.PullRequestId` through `env:` only.
 
-- [ ] Test first: checker case that puts `$(System.PullRequest.PullRequestId)` in the script body must fail.
-- [ ] Implement: find an existing thread carrying the marker `<!-- tfc-workflow-azdo:<workspace> -->` and update it, else create one (Review Focus 4). Post a PR status `succeeded` or `failed` from `runStatus`. API version 7.1.
-- [ ] `tests/run.sh` passes. Commit.
+- [x] Test first: checker case that puts `$(System.PullRequest.PullRequestId)` in the script body must fail.
+- [x] Implement: find an existing thread carrying the marker `<!-- tfc-workflow-azdo:<workspace> -->` and update it, else create one (Review Focus 4). Post a PR status `succeeded` or `failed` from `runStatus`. API version 7.1.
+- [x] `tests/run.sh` passes. Commit.
 
 ### Task 4: Validate step
 
@@ -81,7 +81,7 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 
 **Interfaces:** params `directory`, `terraformImage` (default `hashicorp/terraform:1.17.0`), `tflintImage` (pinned tag), `enableTflint` (bool). No backend init (`terraform init -backend=false`).
 
-- [ ] Test first, implement, `tests/run.sh` passes, commit.
+- [x] Test first, implement, `tests/run.sh` passes, commit.
 
 ### Task 5: Pipelines and examples
 
@@ -92,22 +92,22 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 - `speculative-run.yml`: validate, upload (speculative), run-create (planOnly), plan-output, pr-comment.
 - `apply-run.yml`: stage Plan (upload, run-create, plan-output); stage Apply as a `deployment` job on `environment`, condition on Plan success and `RUN_STATUS` in `planned, cost_estimated, policy_checked, policy_override` (Review Focus 1); `planned_and_finished` skips apply with a message, stage succeeds (Review Focus 2).
 
-- [ ] Tests first (cross-check cases), implement, `tests/run.sh` passes, commit.
+- [x] Tests first (cross-check cases), implement, `tests/run.sh` passes, commit.
 
 ### Task 6: Docs and changelog
 
 **Files:** Rewrite `README.md`, `docs/{setup,tfe-private-network,internal-registry,security,reference,troubleshooting}.md`; delete `docs/migration-guide.md`, old `docs/README.md`, `examples/README.md`; create `CHANGELOG.md` (v2.0.0).
 
-- [ ] Every parameter in `reference.md` generated from or checked against the templates by `check_templates.rb --docs`.
-- [ ] Setup covers: branch-policy build validation, two variable groups with permissions and branch control, team tokens, build service "Contribute to pull requests", environment approval, workspace auto-apply off.
-- [ ] Commit.
+- [x] Every parameter in `reference.md` generated from or checked against the templates by `check_templates.rb --docs`.
+- [x] Setup covers: branch-policy build validation, two variable groups with permissions and branch control, team tokens, build service "Contribute to pull requests", environment approval, workspace auto-apply off.
+- [x] Commit.
 
 ### Task 7: Lab agent on AKS
 
 **Files:** Create `lab/azdo-agent/{namespace,configmap-start,deployment,README}.yaml|md`.
 
-- [ ] Deployment: init container `hashicorp/tfci:v1.4.0` copies `/usr/local/bin/tfci` to an emptyDir; agent container (pinned Ubuntu image) runs Microsoft's documented `start.sh`; secret `azdo-agent` (URL, pool, PAT) created by David; lab CA from a ConfigMap; no privileged mode, non-root where the agent allows.
-- [ ] `kubectl apply --dry-run=server` passes. Commit.
+- [x] Deployment: init container `hashicorp/tfci:v1.4.0` copies `/usr/local/bin/tfci` to an emptyDir; agent container (pinned Ubuntu image) runs Microsoft's documented `start.sh`; secret `azdo-agent` (URL, pool, PAT) created by David; lab CA from a ConfigMap; no privileged mode, non-root where the agent allows.
+- [x] `kubectl apply --dry-run=server` passes. Commit.
 
 ### Task 8: End to end in the lab (with David)
 
@@ -120,7 +120,12 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 
 ### Task 9: Whole-branch review
 
-- [ ] Fresh reviewer over the branch: correctness, security, docs vs code. Fix, re-run `tests/run.sh`, commit. Update `progress.md`.
+- [x] Fresh reviewer (2026-11-15: 13 findings; fixes in progress) over the branch: correctness, security, docs vs code. Fix, re-run `tests/run.sh`, commit. Update `progress.md`.
+
+## Status (2026-11-15)
+
+- [x] Task 1 to 7 done. - [ ] Task 8 end to end (needs David). - [ ] Task 9 fixes and re-review.
+- Deviation: Tasks 2, 3, 4 and 7 ran in parallel in one working tree on disjoint files, committed by path, not in separate worktrees.
 
 ## Parallelism
 
