@@ -43,6 +43,10 @@ else
   record "check_templates (no template dirs)" SKIP
 fi
 
+# 1b. Docs: docs/reference.md matches the templates; links resolve; no em dashes.
+run_check "docs/reference.md up to date" ruby tests/gen_reference.rb --check
+run_check "docs links and style" ruby tests/check_docs.rb
+
 # 2. The v1.4.0 and v1.5.0 tfci manifests list the same commands and flags.
 manifests_equal() {
   diff <(grep -v '^#' tests/tfci-v1.4.0-commands.txt) <(grep -v '^#' tests/tfci-v1.5.0-commands.txt)
