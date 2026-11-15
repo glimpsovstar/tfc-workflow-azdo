@@ -124,7 +124,7 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 
 ## Status (2026-11-15)
 
-- [x] Task 1 to 7 done. - [ ] Task 8 end to end (needs David). - [ ] Task 9 fixes and re-review.
+- [x] Task 1 to 7 done. - [ ] Task 8 end to end (needs David). - [x] Task 9 fixes and re-review.
 - Deviation: Tasks 2, 3, 4 and 7 ran in parallel in one working tree on disjoint files, committed by path, not in separate worktrees.
 
 ## Parallelism
