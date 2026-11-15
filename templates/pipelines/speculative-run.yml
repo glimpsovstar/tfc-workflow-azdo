@@ -87,15 +87,15 @@ stages:
   - stage: Plan
     displayName: Speculative plan
     jobs:
-      - job: plan
-        displayName: Speculative plan (${{ parameters.workspace }})
-        pool: ${{ parameters.pool }}
-        variables:
-          - group: ${{ parameters.variableGroup }}
-        steps:
-          - checkout: self
-
-          - ${{ if eq(parameters.enableValidate, true) }}:
+      # Validate runs PR code locally (terraform init downloads providers,
+      # tflint may download plugins), so it is a separate job with NO variable
+      # group: no secret exists in the job that executes untrusted PR code.
+      - ${{ if eq(parameters.enableValidate, true) }}:
+          - job: validate
+            displayName: Validate (${{ parameters.workspace }})
+            pool: ${{ parameters.pool }}
+            steps:
+              - checkout: self
               - template: ../steps/validate.yml
                 parameters:
                   directory: $(System.DefaultWorkingDirectory)/${{ parameters.directory }}
@@ -105,6 +105,16 @@ stages:
                   enableTflint: ${{ parameters.enableTflint }}
                   caBundle: ${{ parameters.validateCaBundle }}
                   cliConfigFile: ${{ parameters.cliConfigFile }}
+
+      - job: plan
+        displayName: Speculative plan (${{ parameters.workspace }})
+        pool: ${{ parameters.pool }}
+        ${{ if eq(parameters.enableValidate, true) }}:
+          dependsOn: validate
+        variables:
+          - group: ${{ parameters.variableGroup }}
+        steps:
+          - checkout: self
 
           - template: ../steps/upload.yml
             parameters:

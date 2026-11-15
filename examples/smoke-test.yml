@@ -16,14 +16,6 @@ parameters:
   - name: workspace
     displayName: TFE workspace (CLI-driven workflow)
     type: string
-  - name: organization
-    displayName: TFE organization
-    type: string
-    default: my-org
-  - name: hostname
-    displayName: TFE hostname
-    type: string
-    default: tfe.example.internal
   - name: poolName
     displayName: Agent pool
     type: string
@@ -45,8 +37,15 @@ parameters:
 pool:
   name: ${{ parameters.poolName }}
 
+# The hostname and organization are fixed here, not runtime parameters: the
+# token in tfc-plan must only ever go to this TFE. Changing them is a reviewed
+# commit, not a field anyone who can queue the pipeline can edit.
 variables:
   - group: tfc-plan
+  - name: TFE_HOSTNAME
+    value: tfe.example.internal
+  - name: TFE_ORGANIZATION
+    value: my-org
 
 steps:
   - checkout: self
@@ -57,8 +56,8 @@ steps:
       directory: tests/fixtures/random
       speculative: true
       mode: ${{ parameters.mode }}
-      hostname: ${{ parameters.hostname }}
-      organization: ${{ parameters.organization }}
+      hostname: ${{ variables.TFE_HOSTNAME }}
+      organization: ${{ variables.TFE_ORGANIZATION }}
       ${{ if ne(parameters.caBundle, 'none') }}:
         caBundle: ${{ parameters.caBundle }}
 
@@ -69,8 +68,8 @@ steps:
       planOnly: true
       message: Smoke test, Azure DevOps build $(Build.BuildId)
       mode: ${{ parameters.mode }}
-      hostname: ${{ parameters.hostname }}
-      organization: ${{ parameters.organization }}
+      hostname: ${{ variables.TFE_HOSTNAME }}
+      organization: ${{ variables.TFE_ORGANIZATION }}
       ${{ if ne(parameters.caBundle, 'none') }}:
         caBundle: ${{ parameters.caBundle }}
 
@@ -82,7 +81,7 @@ steps:
       runStatus: $(run.RUN_STATUS)
       configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
       mode: ${{ parameters.mode }}
-      hostname: ${{ parameters.hostname }}
-      organization: ${{ parameters.organization }}
+      hostname: ${{ variables.TFE_HOSTNAME }}
+      organization: ${{ variables.TFE_ORGANIZATION }}
       ${{ if ne(parameters.caBundle, 'none') }}:
         caBundle: ${{ parameters.caBundle }}
