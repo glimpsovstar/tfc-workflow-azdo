@@ -34,6 +34,7 @@ done
 
 # 0. The checker's own tests.
 run_check "checker self-tests" bash tests/test_checker.sh
+run_check "pr-comment fake API test" bash tests/pr_comment_test.sh
 
 # 1. Static template checks.
 if [[ ${#TEMPLATE_DIRS[@]} -gt 0 ]]; then
