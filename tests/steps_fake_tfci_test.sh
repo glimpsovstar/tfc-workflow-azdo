@@ -241,6 +241,18 @@ else
   bad "a3: rc=$tfci_rc/$rc out: $out"
 fi
 
+# (a4) run apply on a saved plan TFE discarded (a newer run applied first;
+# seen in the lab end-to-end run).
+fake '{"status":"Error","run_id":"run-abc123","run_status":"discarded"}' 1 'run run-abc123, cannot be applied'
+run_tfci "run apply" "" "$work/tmp/tfci-apply.json"
+tfci_rc=$rc
+run_script "${apply_sh[1]}" TFCI_OUT="$work/tmp/tfci-apply.json" RUN_ID=run-abc123
+if [[ $tfci_rc -eq 1 && $rc -ne 0 && "$out" == *"was discarded in TFE"* && "$out" == *"Nothing was applied"* ]]; then
+  pass "a4: a discarded saved plan fails with the re-run message"
+else
+  bad "a4: rc=$tfci_rc/$rc out: $out"
+fi
+
 # (p1) plan output summary.
 fake '{"status":"Success","plan_id":"plan-def456","plan_status":"finished","add":"1","change":"0","destroy":"2"}' 0
 run_tfci "plan output" "" "$work/tmp/tfci-plan.json"

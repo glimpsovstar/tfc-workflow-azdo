@@ -84,7 +84,7 @@ Any other status fails the Plan stage in the gate step (`Decide whether to apply
 
 Assumption, to confirm in the end-to-end test: `tfci run apply` applies a `planned_and_saved` run. tfci applies only runs that TFE reports as confirmable. The [TFE runs API](https://developer.hashicorp.com/terraform/enterprise/api-docs/run) lists `planned_and_saved` as a state that can be confirmed for apply; neither tfci v1.4.0 nor go-tfe says so directly.
 
-Two merges close together: both plan at once (a saved plan does not lock the workspace) and `lockBehavior: sequential` applies them one after the other. The second saved plan was made against the state before the first apply. Terraform refuses to apply a stale saved plan (`Error: Saved plan is stale`, checked locally with Terraform 1.17.0 on 2026-11-15). Assumption, to confirm in the end-to-end test: TFE applies saved plans the same way, so the second Apply fails safely and you re-run that pipeline.
+Two merges close together: both plan at once (a saved plan does not lock the workspace) and `lockBehavior: sequential` applies them one after the other. The second saved plan was made against the state before the first apply. TFE discards it when the first run applies, so the second Apply fails safely with `Run <id> was discarded in TFE ... Nothing was applied.` Re-run that pipeline for a fresh plan. (Confirmed in the lab on TFE 2.1.1, 2026-11-15. Terraform itself also refuses a stale saved plan: `Error: Saved plan is stale`.)
 
 ## Auto apply detected
 

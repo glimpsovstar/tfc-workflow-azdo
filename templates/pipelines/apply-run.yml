@@ -56,9 +56,9 @@
 # state that can be confirmed for apply
 # (developer.hashicorp.com/terraform/enterprise/api-docs/run).
 # Two merges close together plan at once and apply in order (lockBehavior:
-# sequential). Terraform refuses a stale saved plan ("Saved plan is stale",
-# checked with Terraform 1.17.0); assumed TFE does the same, so the second
-# Apply fails safely and needs a re-run. Confirm in the end-to-end test.
+# sequential). Confirmed in the lab (TFE 2.1.1, 2026-11-15): when the
+# first run applies, TFE discards the second saved plan, so the second Apply
+# fails safely with run status 'discarded' and needs a re-run.
 #
 # Concurrency: the Apply stage sets lockBehavior: sequential. With an
 # Exclusive lock check on the environment, runs then take the environment one

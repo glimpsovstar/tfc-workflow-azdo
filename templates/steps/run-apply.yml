@@ -113,7 +113,13 @@ steps:
           ;;
         Error)
           case "$run_status" in
-            apply_queued | applying | applied | confirmed | errored | canceled | force_canceled | discarded | '')
+            discarded)
+              # Seen in the lab (2026-11-15): when another run applies
+              # first, TFE discards the older saved plan, so nothing stale
+              # is applied.
+              echo "##vso[task.logissue type=error]Run $RUN_ID was discarded in TFE, usually because a newer run applied first and this saved plan went stale. Nothing was applied. Re-run the pipeline for a fresh plan."
+              ;;
+            apply_queued | applying | applied | confirmed | errored | canceled | force_canceled | '')
               echo "##vso[task.logissue type=error]run-apply: tfci could not apply run $RUN_ID (run status '${run_status:-unknown}'). See the run in TFE."
               ;;
             *)
