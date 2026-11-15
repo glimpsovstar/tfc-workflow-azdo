@@ -60,7 +60,7 @@ If `terraform init` in the validate job fails with the same x509 error, the prov
 
 **Cause.** The Apply stage runs only when the Plan stage succeeded and the run status is in the APPLYABLE_MAIN set: `planned`, `planned_and_saved`, `cost_estimated`, `policy_checked`, `post_plan_completed` or `policy_override`. The canonical sets are in `tests/status_sets_test.rb`, which fails if the gate or the stage condition drift from them. The common skip is `planned_and_finished`: the plan has no changes. The gate step then logs `No changes: nothing to apply. The Apply stage is skipped.`
 
-Any other status fails the Plan stage in the gate step (`Decide whether to apply`), so it does not skip silently: `Run <id> ended the plan in '<status>', which this pipeline cannot apply.`
+Any other status fails the Plan stage in the gate step (`Decide whether to apply`), so it does not skip silently: `Run <id> ended the plan in '<status>', which cannot be confirmed or applied.`
 
 **Fix.** For no changes, nothing to fix. For a failed gate, open the run in TFE.
 
@@ -88,9 +88,9 @@ Two merges close together: both plan at once (a saved plan does not lock the wor
 
 ## Auto apply detected
 
-**Symptom.** The gate step fails with `Run <id> is already <status> without an approval: turn Auto apply off on the workspace.`
+**Symptom.** The gate step fails with `Run <id> is already <status> without an approval: turn Auto apply off on the workspace.` (with `applyMethod: tfe`: `without a confirmation in TFE`).
 
-**Cause.** The workspace has Auto apply on. TFE applied, or started applying, the run as soon as the plan finished, before the Azure DevOps approval. The gate looks for `applying`, `apply_queued`, `applied` or `confirmed`.
+**Cause.** The workspace has Auto apply on. TFE applied, or started applying, the run as soon as the plan finished, before the Azure DevOps approval or a confirmation in TFE. The gate looks for `applying`, `apply_queued`, `applied` or `confirmed`.
 
 **Fix.** Turn Auto apply off in the workspace's settings. Check what was applied in TFE. The gate cannot undo it.
 
@@ -152,3 +152,46 @@ Two merges close together: both plan at once (a saved plan does not lock the wor
 **Symptom.** A tfci step fails and the log does not say enough.
 
 **Fix.** Set `logLevel` on the pipeline template to `ERROR`, `WARN`, `INFO` or `DEBUG` (default `''`, logging off). It becomes `TF_LOG` for tfci. Keep DEBUG out of shared logs as a precaution. Set it back to `''` when done. Any other value fails the step before tfci runs.
+
+## environment is required when applyMethod is pipeline
+
+**Symptom.** The first step of the Plan job, `Check template parameters`, fails with `apply-run: environment is required when applyMethod is pipeline`.
+
+**Cause.** `environment` has a default of `''` so that `applyMethod: tfe` consumers can leave it out. With the default `applyMethod: pipeline` the Apply stage needs it.
+
+**Fix.** Pass the Azure DevOps environment that holds the approval ([setup.md](setup.md#3-environment)), or set `applyMethod: tfe` if a person confirms in TFE ([setup.md](setup.md#11-production-confirm-in-tfe)). Nothing was uploaded and no run was created.
+
+## Confirm in TFE: the next run waits
+
+**Symptom.** With `applyMethod: tfe`, a main pipeline waits in `Create run and wait for the plan` and fails after `maxTimeout`. In TFE its run is pending behind an older one.
+
+**Cause.** An earlier run is still waiting for confirmation. A confirmable run holds the workspace, so TFE queues later runs behind it until it is applied or discarded.
+
+**Fix.** Confirm and apply, or discard, the older run in TFE (approvers team). Then re-run the pipeline. Agree a routine with the approvers so runs do not wait for long.
+
+## The plan log is empty or not shown
+
+**Symptom.** The `Terraform plan log` step ends as succeeded with issues, with a warning such as `plan-log: GET https://<host>/api/v2/plans/<id> returned HTTP 404`, `has no log-read-url yet` or `the plan log for <id> is empty`. The PR comment has no Terraform plan block.
+
+**Cause.** One of:
+
+- The plan did not start or produce output: the run errored before the plan, or was canceled.
+- The token cannot read the plan (HTTP 401, 403 or 404): the token's team has no read access to the workspace's runs.
+- The log was removed from TFE (data retention).
+- `curl` failed before HTTP: a TLS error (the step prints curl's message for the API call) or a network problem.
+
+**Fix.** Open the run link and check the plan in TFE. For 401, 403 or 404, check the team access as in [tfci returns 401 or 403](#tfci-returns-401-or-403). For a TLS error, check `caBundle`: in this step it is passed to curl as `--cacert`, which replaces the system roots for the API call. When the log is served by another host (HCP Terraform), curl uses the system roots for it and the step logs `The log is served by another host`. The host is compared with `hostname` in lower case, with a `:443` port dropped.
+
+If the log URL redirects, the step logs `The plan log URL redirected` and follows it once by hand, choosing the CA by the same host rule; curl itself never follows redirects, so `caBundle` is never sent along to another host. A second redirect ends the step with the warning `redirected more than once`.
+
+The step never fails the job for these: the plan text is for reading only. A bad `planId`, `hostname`, `maxLines` or `caBundle` does fail it, because that is a pipeline mistake.
+
+## The plan log URL expired
+
+**Symptom.** The `Terraform plan log` step warns `fetching the plan log returned HTTP 403` (or 401, or 404) `The signed log URL may have expired`.
+
+**Cause.** The plan's `log-read-url` is a signed URL that TFE issues for a short time. The step fetches it straight after reading the plan, so it expires only if the agent is very slow, its clock is far off, or the log host refuses the request (for example a proxy between the agent and TFE strips or rewrites the query string).
+
+**Fix.** Re-run the job; each run of the step asks TFE for a fresh URL. Check the agent's clock and any proxy rules for the log path. curl's own message is not printed for this request, because it could contain the signed URL.
+
+To turn the plan text off, set `showPlanLog: false` on the pipeline template.

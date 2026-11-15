@@ -1,0 +1,44 @@
+# Production main branch pipeline: plan in the pipeline, confirm in TFE.
+#
+# applyMethod: tfe. The pipeline uploads the merged code and creates a normal
+# confirmable run, then stops. A person on the TFE approvers team reviews the
+# plan and the policy results in TFE and confirms and applies the run there.
+# The pipeline never applies, so it holds only the plan token: a leaked
+# pipeline token cannot apply prod. No Azure DevOps environment and no apply
+# variable group are needed.
+#
+# Before the first run (docs/setup.md, "Production: confirm in TFE"):
+#   - Turn Auto apply off on the workspace, or TFE applies before anyone
+#     confirms.
+#   - Variable group tfc-plan holds TF_API_TOKEN: a TFE team token whose team
+#     has plan permission only on this workspace.
+#   - A separate TFE team of approvers has apply permission. Nobody puts that
+#     team's token in Azure DevOps.
+#
+# Replace the placeholder values below.
+trigger:
+  branches:
+    include:
+      - main
+pr: none
+
+resources:
+  repositories:
+    - repository: tfc
+      type: git
+      name: <Project>/tfc-workflow-azdo
+      # The v2.0.0 tag is created at release. Until then this ref does not resolve.
+      ref: refs/tags/v2.0.0
+
+extends:
+  template: templates/pipelines/apply-run.yml@tfc
+  parameters:
+    workspace: my-app-prod
+    organization: my-org
+    hostname: tfe.example.internal
+    pool:
+      name: tfe-agents
+    mode: docker
+    # Absolute path on the agent to the TFE CA PEM file, or '' for a public CA.
+    caBundle: ''
+    applyMethod: tfe

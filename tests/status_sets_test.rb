@@ -65,8 +65,16 @@ def steps_of(node)
   end
 end
 
+# Stages, including those inside a compile-time ${{ if }} item (the Apply
+# stage exists only when applyMethod is pipeline).
 def stages_of(doc)
-  (doc['stages'] || []).select { |s| s.is_a?(Hash) }
+  (doc['stages'] || []).flat_map do |s|
+    if s.is_a?(Hash) && s.size == 1 && s.keys.first.to_s.start_with?('${{')
+      Array(s.values.first)
+    else
+      [s]
+    end
+  end.select { |s| s.is_a?(Hash) }
 end
 
 # Sanity: the sets fit tfci's own lists.

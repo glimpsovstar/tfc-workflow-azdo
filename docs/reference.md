@@ -46,6 +46,7 @@ Extends template for pull request validation builds: a speculative (plan-only) r
 | `jobTimeoutInMinutes` | number | `90` | no | `timeoutInMinutes` of every job. Must exceed `maxTimeout`, or Azure DevOps cancels the job while tfci still waits. |
 | `logLevel` | string | `''` | no | tfci log level, set as `TF_LOG` (`-e TF_LOG` in docker mode): empty (off), `ERROR`, `WARN`, `INFO` or `DEBUG`. Keep DEBUG out of shared logs as a precaution. |
 | `enableValidate` | boolean | `true` | no | Run validate.yml (fmt, init and validate, tflint) before the plan. |
+| `showPlanLog` | boolean | `false` | no | Print the Terraform plan text in the job log (plan-log.yml). In speculative-run.yml it also adds a trimmed copy to the PR comment. The plan shows values not marked sensitive. |
 | `enableTflint` | boolean | `true` | no | Run tflint in validate.yml. |
 | `terraformImage` | string | `hashicorp/terraform:1.17.0` | no | Terraform image for docker mode. |
 | `tflintImage` | string | `ghcr.io/terraform-linters/tflint:v0.66.0` | no | tflint image for docker mode. |
@@ -90,11 +91,13 @@ Extends template for the main branch: plan, approval, apply.
 | `planVariableGroup` | string | `tfc-plan` | no | Variable group for the Plan stage, with the plan token. |
 | `applyVariableGroup` | string | `tfc-apply` | no | Variable group for the Apply stage, with the apply token. |
 | `tokenVariable` | string | `TF_API_TOKEN` | no | Name of the secret pipeline variable that holds the token. Mapped to `TF_API_TOKEN` through `env:`. |
+| `applyMethod` | string | `pipeline` | no | `pipeline`: an Azure DevOps environment approval, then the pipeline applies with the apply token. `tfe`: a person confirms and applies the run in TFE; the run is confirmable (`savePlan` forced off), there is no Apply stage, and `environment` and `applyVariableGroup` are not used. Allowed: `pipeline`, `tfe`. |
 | `maxTimeout` | string | `1h` | no | Set as `TF_MAX_TIMEOUT`: how long tfci waits for the run. |
 | `jobTimeoutInMinutes` | number | `90` | no | `timeoutInMinutes` of every job. Must exceed `maxTimeout`, or Azure DevOps cancels the job while tfci still waits. |
-| `savePlan` | boolean | `true` | no | Create the main-branch run as a saved plan (`--save-plan`). A rejected or expired approval then leaves a saved plan that does not block the workspace. |
+| `savePlan` | boolean | `true` | no | Create the main-branch run as a saved plan (`--save-plan`). A rejected or expired approval then leaves a saved plan that does not block the workspace. Always off when `applyMethod` is `tfe`. |
 | `logLevel` | string | `''` | no | tfci log level, set as `TF_LOG` (`-e TF_LOG` in docker mode): empty (off), `ERROR`, `WARN`, `INFO` or `DEBUG`. Keep DEBUG out of shared logs as a precaution. |
-| `environment` | string |  | yes | Azure DevOps environment for the Apply deployment job. Give it an approval and a branch control check. |
+| `environment` | string | `''` | no | Azure DevOps environment for the Apply deployment job. Give it an approval and a branch control check. Required when `applyMethod` is `pipeline` (the Plan job fails at once without it); not used when it is `tfe`. |
+| `showPlanLog` | boolean | `true` | no | Print the Terraform plan text in the job log (plan-log.yml). In speculative-run.yml it also adds a trimmed copy to the PR comment. The plan shows values not marked sensitive. |
 | `enableValidate` | boolean | `false` | no | Run validate.yml (fmt, init and validate, tflint) before the plan. |
 | `enableTflint` | boolean | `true` | no | Run tflint in validate.yml. |
 | `terraformImage` | string | `hashicorp/terraform:1.17.0` | no | Terraform image for docker mode. |
@@ -105,7 +108,7 @@ Extends template for the main branch: plan, approval, apply.
 Stages and jobs:
 
 - Stage `Plan`, job `plan`: variable group from `planVariableGroup` (default `tfc-plan`).
-- Stage `Apply`, deployment `apply`: variable group from `applyVariableGroup` (default `tfc-apply`); environment from `environment`.
+- Stage `Apply`, deployment `apply`: variable group from `applyVariableGroup` (default `tfc-apply`); environment from `environment`; only when `eq(parameters.applyMethod, 'pipeline')`.
 
 Output variables set by the steps inside. The `Apply` stage reads `RUN_STATUS` and `RUN_ID` with the later-stage forms:
 
@@ -249,6 +252,25 @@ Outputs (step name from the `name` parameter; the default is shown):
 | `CHANGE` | `$(plan_output.CHANGE)` | `dependencies.<job>.outputs['plan_output.CHANGE']` | `stageDependencies.<stage>.<job>.outputs['plan_output.CHANGE']` |
 | `DESTROY` | `$(plan_output.DESTROY)` | `dependencies.<job>.outputs['plan_output.DESTROY']` | `stageDependencies.<stage>.<job>.outputs['plan_output.DESTROY']` |
 
+## plan-log.yml
+
+File: [`templates/steps/plan-log.yml`](../templates/steps/plan-log.yml)
+
+Print the human-readable Terraform plan in the pipeline log, and keep a trimmed copy for the PR comment.
+
+| Parameter | Type | Default | Required | Description |
+| --- | --- | --- | --- | --- |
+| `planId` | string |  | yes | Plan ID (`plan-...`), from run-create.yml. |
+| `hostname` | string |  | yes | HCP Terraform or TFE hostname (`host` or `host:port`). The API call goes to `https://<hostname>/api/v2/plans/<planId>`. Required, so the token only goes to a host the caller names. |
+| `caBundle` | string | `''` | no | Absolute path on the agent to a PEM file for curl `--cacert`, used for the API call and for the log URL when it is on the same host. Replaces the system roots for those calls. |
+| `tokenVariable` | string | `TF_API_TOKEN` | no | Name of the secret pipeline variable that holds the token. Mapped through `env:` and given to curl on stdin (`curl -K -`), never on argv. |
+| `maxLines` | number | `300` | no | Lines of the plan log kept in `outputFile`, followed by a "trimmed" line when the log is longer. The job log always gets the whole log. |
+| `outputFile` | string | `$(Agent.TempDirectory)/plan-log.txt` | no | File for the trimmed plan log, read by pr-comment.yml. |
+| `condition` | string | `succeeded()` | no | Step condition. |
+| `displayName` | string | `Terraform plan log` | no | Step display name. |
+
+Outputs: none.
+
 ## run-apply.yml
 
 File: [`templates/steps/run-apply.yml`](../templates/steps/run-apply.yml)
@@ -293,6 +315,8 @@ Post the Terraform plan summary to the pull request as one thread, and set a PR 
 | `add` | string | `''` | no | Resources to add, from plan-output.yml. For the PR status. |
 | `change` | string | `''` | no | Resources to change, from plan-output.yml. For the PR status. |
 | `destroy` | string | `''` | no | Resources to destroy, from plan-output.yml. For the PR status. |
+| `planLogFile` | string | `$(Agent.TempDirectory)/plan-log.txt` | no | Trimmed plan log from plan-log.yml. Appended to the comment, collapsed, when it exists. |
+| `includePlanLog` | boolean | `true` | no | Append `planLogFile` to the comment in a collapsed block, capped at 100,000 characters. |
 | `statusContextGenre` | string | `terraform` | no | PR status context genre. |
 | `statusContextName` | string | `tfe-plan` | no | PR status context name. |
 | `condition` | string | `succeededOrFailed()` | no | Step condition. |

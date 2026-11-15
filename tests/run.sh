@@ -34,8 +34,10 @@ done
 # 0. The checker's own tests.
 run_check "checker self-tests" bash tests/test_checker.sh
 run_check "pr-comment fake API test" bash tests/pr_comment_test.sh
+run_check "plan-log fake TFE test" bash tests/plan_log_test.sh
 run_check "examples vs templates (--alias tfc=.)" bash tests/alias_test.sh
 run_check "status sets (gate, Apply condition, pr-comment)" ruby tests/status_sets_test.rb
+run_check "apply methods and plan log wiring (rendered)" ruby tests/apply_method_test.rb
 run_check "output variable references" ruby tests/output_refs_test.rb
 run_check "step scripts with a fake tfci" bash tests/steps_fake_tfci_test.sh
 

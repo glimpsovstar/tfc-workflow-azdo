@@ -39,6 +39,7 @@ TEMPLATES = %w[
   templates/steps/upload.yml
   templates/steps/run-create.yml
   templates/steps/plan-output.yml
+  templates/steps/plan-log.yml
   templates/steps/run-apply.yml
   templates/steps/pr-comment.yml
   templates/steps/validate.yml
@@ -63,7 +64,16 @@ DESCRIPTIONS = {
   'planVariableGroup' => 'Variable group for the Plan stage, with the plan token.',
   'applyVariableGroup' => 'Variable group for the Apply stage, with the apply token.',
   'tokenVariable' => 'Name of the secret pipeline variable that holds the token. Mapped to `TF_API_TOKEN` through `env:`.',
-  'environment' => 'Azure DevOps environment for the Apply deployment job. Give it an approval and a branch control check.',
+  'environment' => 'Azure DevOps environment for the Apply deployment job. Give it an approval and a branch control check. Required when `applyMethod` is `pipeline` (the Plan job fails at once without it); not used when it is `tfe`.',
+  'applyMethod' => '`pipeline`: an Azure DevOps environment approval, then the pipeline applies with the apply token. `tfe`: a person confirms and applies the run in TFE; the run is confirmable (`savePlan` forced off), there is no Apply stage, and `environment` and `applyVariableGroup` are not used.',
+  'showPlanLog' => 'Print the Terraform plan text in the job log (plan-log.yml). In speculative-run.yml it also adds a trimmed copy to the PR comment. The plan shows values not marked sensitive.',
+  'maxLines' => 'Lines of the plan log kept in `outputFile`, followed by a "trimmed" line when the log is longer. The job log always gets the whole log.',
+  'plan-log.yml:hostname' => 'HCP Terraform or TFE hostname (`host` or `host:port`). The API call goes to `https://<hostname>/api/v2/plans/<planId>`. Required, so the token only goes to a host the caller names.',
+  'plan-log.yml:tokenVariable' => 'Name of the secret pipeline variable that holds the token. Mapped through `env:` and given to curl on stdin (`curl -K -`), never on argv.',
+  'plan-log.yml:outputFile' => 'File for the trimmed plan log, read by pr-comment.yml.',
+  'plan-log.yml:caBundle' => 'Absolute path on the agent to a PEM file for curl `--cacert`, used for the API call and for the log URL when it is on the same host. Replaces the system roots for those calls.',
+  'planLogFile' => 'Trimmed plan log from plan-log.yml. Appended to the comment, collapsed, when it exists.',
+  'includePlanLog' => 'Append `planLogFile` to the comment in a collapsed block, capped at 100,000 characters.',
   'enableValidate' => 'Run validate.yml (fmt, init and validate, tflint) before the plan.',
   'enableTflint' => 'Run tflint in validate.yml.',
   'terraformImage' => 'Terraform image for docker mode.',
@@ -79,7 +89,7 @@ DESCRIPTIONS = {
   'jobTimeoutInMinutes' => '`timeoutInMinutes` of every job. Must exceed `maxTimeout`, or Azure DevOps cancels the job while tfci still waits.',
   'logLevel' => 'tfci log level, set as `TF_LOG` (`-e TF_LOG` in docker mode): empty (off), `ERROR`, `WARN`, `INFO` or `DEBUG`. Keep DEBUG out of shared logs as a precaution.',
   'savePlan' => 'Create a saved-plan run (`--save-plan`). It ends in `planned_and_saved` and does not lock the workspace until it is applied.',
-  'apply-run.yml:savePlan' => 'Create the main-branch run as a saved plan (`--save-plan`). A rejected or expired approval then leaves a saved plan that does not block the workspace.',
+  'apply-run.yml:savePlan' => 'Create the main-branch run as a saved plan (`--save-plan`). A rejected or expired approval then leaves a saved plan that does not block the workspace. Always off when `applyMethod` is `tfe`.',
   'outputFile' => "File for tfci's JSON output. Empty: `$(Agent.TempDirectory)/tfci-<name>.json`.",
   'condition' => 'Step condition.',
   'speculative' => 'Upload a speculative configuration version (plan only, for PRs).',
@@ -211,7 +221,16 @@ def pipeline_section(rel)
   dir = File.dirname(rel)
   lines = ['Stages and jobs:', '']
   outputs = []
-  doc['stages'].each do |stage|
+  # A stage inside ${{ if }} exists only when its condition holds.
+  stages = (doc['stages'] || []).flat_map do |item|
+    if item.is_a?(Hash) && item.size == 1 && item.keys.first.to_s.start_with?('${{')
+      cond = item.keys.first.to_s[/\A\$\{\{\s*if\s+(.*?)\s*\}\}\z/, 1]
+      Array(item.values.first).map { |st| st.merge('_when' => cond) }
+    else
+      [item]
+    end
+  end
+  stages.each do |stage|
     flatten(stage['jobs']).each do |job|
       kind = job['deployment'] ? 'deployment' : 'job'
       jname = job['deployment'] || job['job']
@@ -231,6 +250,7 @@ def pipeline_section(rel)
       extra << 'no variable group' if groups.empty?
       extra << "depends on `#{depends}` when validate is on" if depends
       extra << "environment #{job['environment'].include?('parameters.environment') ? 'from `environment`' : "`#{job['environment']}`"}" if job['environment']
+      extra << "only when `#{stage['_when']}`" if stage['_when']
       lines << "- Stage `#{stage['stage']}`, #{kind} `#{jname}`: #{extra.join('; ')}."
       steps = job['steps'] || job.dig('strategy', 'runOnce', 'deploy', 'steps')
       flatten(steps).each do |s|
@@ -245,9 +265,9 @@ def pipeline_section(rel)
     end
   end
   caption = 'Output variables set by the steps inside'
-  caption += if doc['stages'].size > 1
+  caption += if stages.size > 1
                used = File.readlines(File.join(ROOT, rel)).reject { |l| l.lstrip.start_with?('#') }.join.scan(/outputs\['[\w.]+\.(\w+)'\]/).flatten.uniq
-               ". The `#{doc['stages'][1]['stage']}` stage reads #{used.map { |v| "`#{v}`" }.join(' and ')} with the later-stage forms:"
+               ". The `#{stages[1]['stage']}` stage reads #{used.map { |v| "`#{v}`" }.join(' and ')} with the later-stage forms:"
              else
                '. The template has one stage, so the later-stage forms are for reference only:'
              end

@@ -4,6 +4,8 @@ Azure DevOps pipeline templates for HCP Terraform and Terraform Enterprise (TFE)
 
 - A pull request gets a speculative plan of its own code. The pipeline posts the plan summary to the PR as a thread and sets a PR status.
 - A merge to `main` uploads the code, creates a run, waits for an Azure DevOps environment approval, then applies that same run.
+- For production, `applyMethod: tfe` leaves the apply to a person in TFE: the pipeline plans with a plan-only token and the approver confirms the run in TFE, where they see the full plan and the policy results. The pipeline holds no apply token. See [setup.md](docs/setup.md#11-production-confirm-in-tfe).
+- The main pipeline prints the Terraform plan text in the job log (`showPlanLog`, on by default). On a PR it is off by default, because a PR author could print a secret workspace variable through it; turned on, the PR comment also carries a trimmed copy, collapsed. The plan shows every value not marked sensitive: see [security.md](docs/security.md#the-plan-text-in-logs-and-pr-comments).
 
 The same templates work against HCP Terraform and a private TFE with a private CA, internal images and no inbound connectivity. Only parameters change.
 
@@ -22,14 +24,16 @@ sequenceDiagram
   Agent->>TFE: upload --speculative, get configuration_version_id
   Agent->>TFE: run create --plan-only on that configuration version
   TFE-->>Agent: run_id, run_status, plan_id (tfci waits for the plan)
-  Agent->>TFE: plan output
-  Agent->>ADO: PR thread and PR status (System.AccessToken)
+  Agent->>TFE: plan output, then the plan log (log-read-url)
+  Agent->>ADO: PR thread with the plan, and PR status (System.AccessToken)
   Eng->>ADO: merge to main
   Note over ADO: CI trigger queues apply-run
   Agent->>TFE: upload, run create on that configuration version
   Note over Agent,ADO: Apply stage waits for the environment approval
   Agent->>TFE: run apply (tfci waits until applied)
 ```
+
+With `applyMethod: tfe` the main pipeline stops after the plan. The run waits in TFE until an approver confirms and applies it there.
 
 ## Quick start
 
@@ -61,13 +65,14 @@ Full examples:
 
 - [`examples/azure-pipelines.pr.yml`](examples/azure-pipelines.pr.yml): the PR pipeline (`speculative-run.yml`).
 - [`examples/azure-pipelines.main.yml`](examples/azure-pipelines.main.yml): the main pipeline (`apply-run.yml`).
+- [`examples/azure-pipelines.main-prod.yml`](examples/azure-pipelines.main-prod.yml): the production main pipeline (`apply-run.yml` with `applyMethod: tfe`): no environment, no apply token.
 - [`examples/smoke-test.yml`](examples/smoke-test.yml): a manual plan-only run that proves the agent, token and CA work.
 
 ## What you need
 
 - **A self-hosted agent** that reaches TFE and Azure DevOps. In `docker` mode (the default) it needs Docker, bash, jq and curl 7.76 or later. In `native` mode it needs `tfci` on the PATH, bash, jq and curl, plus `terraform` and `tflint` when validation is on.
-- **Two variable groups**: `tfc-plan` with a plan-permission team token and `tfc-apply` with an apply team token, each as the secret `TF_API_TOKEN`.
-- **An environment** for the Apply stage, with an approval and a branch control check.
+- **Two variable groups**: `tfc-plan` with a plan-permission team token and `tfc-apply` with an apply team token, each as the secret `TF_API_TOKEN`. With `applyMethod: tfe`, only `tfc-plan`, plus a TFE approvers team with apply permission.
+- **An environment** for the Apply stage, with an approval and a branch control check (not with `applyMethod: tfe`).
 - **A branch policy** with build validation, so PRs run the PR pipeline.
 - **Workspaces** using the CLI-driven workflow with Auto apply off.
 
@@ -83,6 +88,7 @@ templates/
   steps/upload.yml                tfci upload, sets CONFIGURATION_VERSION_ID
   steps/run-create.yml            tfci run create, sets RUN_ID, RUN_STATUS, PLAN_ID, PLAN_STATUS, RUN_LINK
   steps/plan-output.yml           tfci plan output, writes a markdown summary
+  steps/plan-log.yml              the Terraform plan text from the TFE API, in the log and a trimmed file
   steps/pr-comment.yml            PR thread and PR status through the Azure DevOps REST API
   steps/run-apply.yml             tfci run apply
   steps/validate.yml              terraform fmt, validate and tflint
@@ -111,7 +117,7 @@ docs/                             setup, security, reference, troubleshooting
 bash tests/run.sh
 ```
 
-It runs the template checker and its self-tests, the PR comment test against a fake Azure DevOps API, the examples against the local templates, a check that the tfci v1.4.0 and v1.5.0 command manifests match, shellcheck on every script in the templates, `terraform fmt`, `validate` and `tflint` on the fixture, and a check that [docs/reference.md](docs/reference.md) matches the templates. It needs Ruby, shellcheck and Terraform; tflint is optional.
+It runs the template checker and its self-tests, the PR comment test against a fake Azure DevOps API, the plan log test against a fake TFE over HTTPS, a render of both apply methods, the examples against the local templates, a check that the tfci v1.4.0 and v1.5.0 command manifests match, shellcheck on every script in the templates, `terraform fmt`, `validate` and `tflint` on the fixture, and a check that [docs/reference.md](docs/reference.md) matches the templates. It needs Ruby, shellcheck and Terraform; tflint is optional.
 
 ## What changed in v2
 

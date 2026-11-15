@@ -4,7 +4,16 @@
 # One stage, two jobs:
 #   validate (optional, no variable group: it runs untrusted PR code), then
 #   plan: checkout, upload (speculative), run-create (plan only, on that
-#   configuration version), plan-output, pr-comment.
+#   configuration version), plan-output, plan-log (optional, on by default),
+#   pr-comment.
+#
+# Plan text: off by default on PRs. With showPlanLog true, plan-log.yml prints
+# the Terraform plan in the job log and pr-comment.yml adds a trimmed copy to
+# the PR thread, collapsed. The plan shows every value not marked sensitive to
+# anyone who can read the log or the PR, and a PR author controls the code that
+# is planned, so they could print a secret workspace variable through an
+# output (docs/security.md). Turn it on only when PR authors are trusted and
+# the workspace holds no secrets they should not see.
 #
 # The run is pinned to the configuration version this build uploaded
 # ($(upload.CONFIGURATION_VERSION_ID)), so two PRs at once each see their own
@@ -79,6 +88,12 @@ parameters:
   - name: enableValidate
     type: boolean
     default: true
+  # Print the Terraform plan text in the log and add it to the PR comment.
+  # Off by default: a PR author could print workspace secrets through it
+  # (docs/security.md).
+  - name: showPlanLog
+    type: boolean
+    default: false
   - name: enableTflint
     type: boolean
     default: true
@@ -179,6 +194,15 @@ stages:
               maxTimeout: ${{ parameters.maxTimeout }}
               logLevel: ${{ parameters.logLevel }}
 
+          - ${{ if eq(parameters.showPlanLog, true) }}:
+              - template: ../steps/plan-log.yml
+                parameters:
+                  condition: and(succeededOrFailed(), ne(variables['run.PLAN_ID'], ''))
+                  planId: $(run.PLAN_ID)
+                  hostname: ${{ parameters.hostname }}
+                  caBundle: ${{ parameters.caBundle }}
+                  tokenVariable: ${{ parameters.tokenVariable }}
+
           # Default condition succeededOrFailed(): posts after a failed plan too.
           - template: ../steps/pr-comment.yml
             parameters:
@@ -188,3 +212,4 @@ stages:
               add: $(plan_output.ADD)
               change: $(plan_output.CHANGE)
               destroy: $(plan_output.DESTROY)
+              includePlanLog: ${{ parameters.showPlanLog }}

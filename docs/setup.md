@@ -13,6 +13,8 @@ Create two TFE (or HCP Terraform) teams and a team token for each:
 | Plan token | Plan (can queue plans, cannot apply) | PR builds and the Plan stage of `apply-run.yml` |
 | Apply token | Write, or a custom permission that can apply runs | The Apply stage of `apply-run.yml` only |
 
+With `applyMethod: tfe` (production, a person confirms in TFE) there is no apply token at all: see [step 11](#11-production-confirm-in-tfe).
+
 Use team tokens, never user tokens:
 
 - A user token carries everything that person can do, in every organisation they belong to. A team token carries only that team's permissions.
@@ -43,7 +45,7 @@ Add a Required template check to both groups too: see [step 10](#10-required-tem
 
 ## 3. Environment
 
-In Pipelines, Environments, create the environment named in the `environment` parameter of `apply-run.yml` (the example uses `my-app-dev`). Under Approvals and checks add:
+In Pipelines, Environments, create the environment named in the `environment` parameter of `apply-run.yml` (the example uses `my-app-dev`). `environment` is required with the default `applyMethod: pipeline`: without it the Plan job fails before it uploads anything. With `applyMethod: tfe` there is no environment ([step 11](#11-production-confirm-in-tfe)). Under Approvals and checks add:
 
 - **Approvals:** the people who approve applies.
 - **Branch control:** Allowed branches `refs/heads/main,refs/tags/v2.*` (the template repository's release tags must be allowed too; see step 2).
@@ -59,6 +61,8 @@ Azure Repos ignores the YAML `pr:` trigger. PR builds come from a branch policy:
 
 1. Create the PR pipeline from your copy of [`examples/azure-pipelines.pr.yml`](../examples/azure-pipelines.pr.yml). It sets `trigger: none` and `pr: none`.
 2. Project settings, Repositories, your repository, Policies, Branch policies, `main`, Build validation: add the PR pipeline. Set it to Required and to re-run when the source branch updates.
+
+The PR pipeline does not print the plan text by default (`showPlanLog: false` on `speculative-run.yml`): a PR author could print a secret workspace variable through it. Turn it on only when PR authors are trusted and the workspace holds no secrets they should not see. The main pipeline prints it by default. See [security.md](security.md#the-plan-text-in-logs-and-pr-comments).
 
 Create the main pipeline from [`examples/azure-pipelines.main.yml`](../examples/azure-pipelines.main.yml). It runs on pushes to `main` (`trigger: branches: include: main`) and sets `pr: none`.
 
@@ -77,7 +81,7 @@ Assumption: the job authorisation scope is the project (see step 9). If it is th
 On each workspace the pipelines use:
 
 - **Workflow:** CLI-driven (API-driven). The pipelines upload configuration versions; the workspace is not connected to a VCS repository.
-- **Auto apply:** off. With it on, TFE applies the run as soon as the plan finishes, before anyone approves in Azure DevOps. The Plan stage's gate step fails when it sees the run already `applying`, `apply_queued`, `applied` or `confirmed`.
+- **Auto apply:** off. With it on, TFE applies the run as soon as the plan finishes, before anyone approves in Azure DevOps or confirms in TFE. The Plan stage's gate step fails when it sees the run already `applying`, `apply_queued`, `applied` or `confirmed`.
 - **Execution mode:** remote or agent. Remote runs on HCP Terraform or TFE workers. Agent runs on HCP Terraform agents in your network; pick it when the run needs to reach private resources. The pipelines work the same with either: tfci only talks to the TFE API.
 
 ## 7. Agent requirements
@@ -137,3 +141,32 @@ For each: Repository type Azure Repos, Repository `<Project>/tfc-workflow-azdo`,
 Microsoft: [Templates for security, Required templates](https://learn.microsoft.com/azure/devops/pipelines/security/templates?view=azure-devops#required-templates) and [Approvals and checks, Required template](https://learn.microsoft.com/azure/devops/pipelines/process/approvals?view=azure-devops#required-template). "This check applies only when the pipeline extends from a template."
 
 The smoke test does not extend a pipeline template, so with this check on `tfc-plan` it cannot load the group. Run it with its own variable group and a plan token, or before you add the check.
+
+## 11. Production: confirm in TFE
+
+For production, a person can confirm the apply in TFE instead of approving it in Azure DevOps. Set `applyMethod: tfe` on `apply-run.yml`, as in [`examples/azure-pipelines.main-prod.yml`](../examples/azure-pipelines.main-prod.yml). The pipeline then only plans: it uploads the merged code, creates a normal confirmable run (never a saved plan, `savePlan` is forced off) and stops. The run waits in TFE for confirmation, like a run started in TFE, until an approver confirms and applies it or discards it.
+
+Teams, per production workspace:
+
+| Team | Workspace permission | Token |
+| --- | --- | --- |
+| Pipeline team | Plan (can queue plans, cannot apply) | A team token, as `TF_API_TOKEN` in `tfc-plan` (or the group named by `planVariableGroup`) |
+| Approvers team | Write, or a custom permission that can apply runs | None. Approvers sign in to TFE as themselves. No apply token goes into Azure DevOps. |
+
+Settings:
+
+- **Auto apply: off** on the workspace. With it on, TFE applies straight after the plan and nobody confirms. The gate step fails when it sees the run applying or applied, but only after the fact.
+- **No apply group and no environment.** In this mode the template does not create the Apply stage and does not use `applyVariableGroup` or `environment`. Do not create a `tfc-apply` group for this pipeline.
+- **Required template check** on `tfc-plan` stays as in [step 10](#10-required-template-checks).
+
+What the approver does: open the run link from the pipeline log (the gate step logs `Confirm and apply run <id> in TFE: <run link>. The pipeline does not apply in this mode.` as a warning), read the plan and the policy results in TFE, then confirm and apply, or discard.
+
+What the pipeline result means: the result is the plan's result. Green means the plan finished and waits for confirmation, or had no changes. It does not mean anything was applied, and the pipeline does not wait for the apply.
+
+Unconfirmed runs hold the workspace: a later run queues behind them. Confirm or discard runs promptly, or the next merge's plan waits until `maxTimeout` and fails. See [troubleshooting.md](troubleshooting.md#confirm-in-tfe-the-next-run-waits).
+
+Assumptions, to confirm in the lab:
+
+- **A leaked plan token cannot apply.** Tested in the lab on TFE 2.1.1 (2026-11-15, [PROOF.md](PROOF.md)): a plan-permission team token can upload a configuration version and create a run that waits for confirmation, but TFE refuses (HTTP 404) a run created with `auto-apply: true` and an apply of an existing run (`POST /runs/:id/actions/apply`). The worst a leaked plan token can do is queue plans that a person with apply permission still has to confirm.
+- A plan-permission team token can create a confirmable (not speculative, not saved) run through the API. The lab run (2026-11-15) proved it for saved-plan runs with the same token.
+- The run shows in the TFE UI as needing confirmation, with the confirm button for the approvers team only.

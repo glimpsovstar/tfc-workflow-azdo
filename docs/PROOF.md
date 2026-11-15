@@ -24,6 +24,7 @@ tfc-workflow-azdo `v2.0.0-rc.1` was run in Azure DevOps Services against Terrafo
 | 8 | Policy passes on a later push to the same PR | 17 | | Pass. PR status `succeeded`, same thread. |
 | 9 | Main with a policy set attached | 18 | `run-YQAG4XSnZ4PRrqGz` (`applied`) | Pass. Policy passed, approval, applied. See the note below. |
 | 10 | Agent deregisters through the REST API when its pod stops | | | Pass. The stopped pod's agent left the pool; the new one registered. |
+| 11 | A plan-permission team token cannot apply (for `applyMethod: tfe`) | | control `run-9GA6wGMfc4bWAqNg` | Pass. With a temporary token for the plan team: configuration version upload allowed; run create without auto-apply allowed (control run, then discarded); run create with `auto-apply: true` refused (404); `POST /runs/:id/actions/apply` refused (404). Temporary tokens deleted afterwards. |
 
 Run 9: with saved plans on, TFE reports `planned_and_saved` after the policy check, so the gate sees that rather than `policy_checked`. `policy_checked` occurs with `savePlan: false`; that path is covered by `tests/status_sets_test.rb`, not by this run.
 

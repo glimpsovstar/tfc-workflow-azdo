@@ -5,7 +5,10 @@
 #
 # Usage: ruby tests/output_refs_test.rb [files...]
 #   With no files: templates/pipelines/*.yml and examples/*.yml, plus a
-#   self-test that a wrong reference is reported.
+#   self-test that a wrong reference is reported. apply-run.yml is also
+#   checked once per applyMethod (pipeline, tfe) and with showPlanLog off,
+#   rendered with tests/render.rb, so a reference to a step that exists in only
+#   one mode is caught.
 #
 # References found (comment lines are skipped):
 #   $(<step>.<VAR>)
@@ -20,6 +23,7 @@
 
 require 'yaml'
 require 'tmpdir'
+require_relative 'render'
 
 ROOT = File.expand_path('..', __dir__)
 SETVAR_RE = /##vso\[task\.setvariable variable=(\w+);[^\]]*isOutput=true\]/.freeze
@@ -83,8 +87,8 @@ def template_outputs(target, passed)
   out
 end
 
-def outputs_in(path)
-  doc = YAML.safe_load(File.read(path))
+def outputs_in(path, doc = nil)
+  doc ||= YAML.safe_load(File.read(path))
   out = Hash.new { |h, k| h[k] = [] }
   all_steps(doc).each do |st|
     if st['template'].is_a?(String) && st['template'] =~ %r{steps/[\w-]+\.yml}
@@ -131,7 +135,53 @@ files.each do |f|
   end
 end
 
+# Each mode of apply-run.yml, rendered: every reference in the rendered
+# document must name a step that the same rendering sets.
+def check_rendered(rel, overrides)
+  path = File.join(ROOT, rel)
+  doc = Render.template(rel, overrides)
+  outs = outputs_in(path, doc)
+  problems = []
+  Render.strings(doc['stages']).each do |str|
+    REF_RES.each do |re|
+      str.scan(re).each do |step, var|
+        next if outs.key?(step) && outs[step].include?(var)
+
+        problems << "#{rel} #{overrides.inspect}: reference #{step}.#{var} has no step that sets it in this mode"
+      end
+    end
+  end
+  problems.uniq
+end
+
 if ARGV.empty?
+  modes = [
+    ['templates/pipelines/apply-run.yml', { 'applyMethod' => 'pipeline', 'environment' => 'e' }],
+    ['templates/pipelines/apply-run.yml', { 'applyMethod' => 'tfe' }],
+    ['templates/pipelines/apply-run.yml', { 'applyMethod' => 'tfe', 'showPlanLog' => false }],
+    ['templates/pipelines/speculative-run.yml', { 'showPlanLog' => false }]
+  ]
+  modes.each do |rel, ov|
+    problems = check_rendered(rel, ov)
+    if problems.empty?
+      puts "ok   #{rel} rendered with #{ov.inspect}: references match steps"
+    else
+      puts problems.map { |p| "FAIL #{p}" }
+      failures += 1
+    end
+  end
+  # Self-test: a tfe rendering that kept the Apply stage's RUN_ID reference
+  # would be caught. Simulated by checking the pipeline-only reference against
+  # the tfe outputs.
+  tfe_outs = outputs_in(File.join(ROOT, 'templates/pipelines/apply-run.yml'),
+                        Render.template('templates/pipelines/apply-run.yml', 'applyMethod' => 'tfe'))
+  if tfe_outs.key?('apply')
+    puts 'FAIL self-test: the tfe rendering still has the apply step'
+    failures += 1
+  else
+    puts 'ok   self-test: the tfe rendering has no apply step, so a reference to it would be reported'
+  end
+
   Dir.mktmpdir do |dir|
     bad = File.join(dir, 'bad.yml')
     File.write(bad, <<~YAML)

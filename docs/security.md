@@ -5,7 +5,7 @@
 What these templates protect:
 
 - **The TFE tokens.** The plan token can queue plans. The apply token can change infrastructure.
-- **The approval.** Nothing should be applied that a person did not approve in Azure DevOps.
+- **The approval.** Nothing should be applied that a person did not approve: in Azure DevOps (`applyMethod: pipeline`) or by confirming the run in TFE (`applyMethod: tfe`).
 - **The PR feedback.** The plan shown on a PR should be the plan of that PR's code, posted by the pipeline.
 
 Who they protect them from:
@@ -24,6 +24,32 @@ There are two variable groups with two team tokens ([setup.md](setup.md#1-team-t
 - `tfc-apply`: the apply token. Only the Apply stage of `apply-run.yml` loads it. The group has pipeline permission for the main pipeline only, an approval, and a branch control check on `refs/heads/main`. The Apply stage also runs on an environment with its own approval and branch control.
 
 PR code never runs in a job that holds the apply token. In `speculative-run.yml` the `validate` job, which runs PR code on the agent, has **no variable group at all**, so no token exists in that job. The `plan` job loads `tfc-plan` and only uploads files and calls the TFE API.
+
+## Production: confirm in TFE
+
+With `applyMethod: tfe` on `apply-run.yml` ([setup.md](setup.md#11-production-confirm-in-tfe)) the pipeline only plans. A person on a TFE approvers team confirms and applies the run in TFE. This is the stronger control for production:
+
+- **No apply token in Azure DevOps.** The pipeline holds only the plan token. A plan-permission token cannot apply (tested on TFE 2.1.1: run create with `auto-apply` and the apply action are both refused, see [PROOF.md](PROOF.md)), so a leaked pipeline token, a misconfigured variable group, a compromised agent or a pipeline edited to skip the approval still cannot apply production. In the default `pipeline` mode the apply token lives in Azure DevOps, protected by checks; here it does not exist.
+- **The approval is where the apply happens.** TFE checks the approver's own permission (an apply-capable team) at the moment of the apply. There is no gap between an Azure DevOps approval and a later API call made with a shared token.
+- **The approver sees the real plan.** They read the full plan and the policy results in TFE, on the run that will be applied, not a summary in Azure DevOps.
+- **The audit trail names a person.** TFE records who confirmed the run, not a team token.
+
+What it does not change: Auto apply must still be off (TFE setting, not enforceable from the pipeline), and the plan still runs the merged code with the workspace's plan credentials.
+
+## The plan text in logs and PR comments
+
+`showPlanLog` turns on the plan text. With it on, `plan-log.yml` prints the Terraform plan in the job log, and `speculative-run.yml` also adds a trimmed copy to the PR comment, collapsed. The defaults differ:
+
+- **PR (`speculative-run.yml`): off by default.** On a PR the author controls the code being planned, so the plan text lets them show any value the workspace can read. For example, `output "x" { value = nonsensitive(var.secret) }` prints a secret workspace variable in the plan, and with `showPlanLog: true` everyone with read access to the repository sees it in the job log and the PR comment. Turn it on only when PR authors are trusted and the workspace holds no secrets they should not see.
+- **Main (`apply-run.yml`): on by default.** On `main` the code has been reviewed and merged before it is planned, so the plan text shows only what reviewed code chose to output.
+
+- **What it exposes.** Terraform masks values marked sensitive (`(sensitive value)`), but it prints every other attribute value in clear text: resource names, IP ranges, tags, non-sensitive variables and outputs, and anything a provider does not mark sensitive. Anyone who can read the pipeline log, or the PR, sees them. On a PR that includes everyone with read access to the repository.
+- **How it is fetched.** The step reads the plan with the token (`curl -K -`, the header on stdin, never on argv), then fetches the plan's `log-read-url`, a signed URL, without the Authorization header. Neither the token nor the signed URL is printed.
+- **Log injection.** The log text can carry values from the PR's code. The step strips ANSI codes and control characters and breaks up every `##` in the log text (`##` becomes `# #`) before it prints the log or writes the file, so no Azure DevOps logging command survives in any spelling: `##vso[`, `##VSO[`, `##[error]`, or `##` followed by an invisible character. A value in the plan cannot set a pipeline variable or fail the build. `pr-comment.yml` does the same to an API response it prints on a failed call. In the PR comment, triple backticks are replaced so the log cannot close its code fence, and HTML in the log stays inside that fence.
+- **Private CA and redirects.** `caBundle` is used for the log URL only when its host matches `hostname` (lower case, `:443` dropped). curl does not follow redirects; the step follows one by hand and picks the CA by the same rule, so the private CA is never trusted for another host.
+- **How to turn it off.** Set `showPlanLog: false` on the pipeline template. The pipeline then shows the counts and the run link only, as before. On `pr-comment.yml` alone, `includePlanLog: false` keeps the plan out of the PR while the job log still has it.
+
+Mark sensitive variables and outputs as `sensitive = true` in the Terraform code. That is the control that keeps a value out of the plan text.
 
 ## Required template checks
 
@@ -108,5 +134,6 @@ The lab runs the agent as a Kubernetes pod in native mode: jobs run as UID 1001 
 - **A self-hosted agent's own credential is readable by job code,** because jobs run as the agent's user. A job can act as that agent until the registration is removed.
 - **`System.AccessToken` is in the PR job.** It is scoped by the job authorisation settings ([setup.md](setup.md#9-project-settings)) and needs only "Contribute to pull requests" on top of the defaults.
 - **Workspace Auto apply is a TFE setting the pipeline cannot enforce.** If someone turns it on, TFE applies before the Azure DevOps approval. The Plan stage fails when it sees the run already applying or applied, but by then the apply has started.
-- **The approver sees the plan summary, not the full plan.** Approvers should open the run link and read the plan in TFE.
+- **In `pipeline` mode the approver approves in Azure DevOps, away from the plan.** The plan text is in the Plan job's log (`showPlanLog`), but approvers should open the run link and read the plan and policy results in TFE. `applyMethod: tfe` puts the approval on the plan itself.
+- **The plan text shows non-sensitive values** in the job log and, when `showPlanLog` is turned on for PRs, in the PR comment, as above.
 - **Tag pins are mutable.** Until images are pinned by digest, a re-pushed tag changes what runs.

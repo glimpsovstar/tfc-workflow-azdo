@@ -15,6 +15,17 @@
 #      status, exit 0
 #   d. HTTP 403: non-zero exit, message names "Contribute to pull requests"
 #   e. the token never appears in stdout or stderr (checked in every case)
+#   p1. a plan log file: appended in <details><summary>Terraform plan</summary>
+#       and a ```text fence; triple backticks in the log are replaced
+#   p2. includePlanLog false: no plan block
+#   p3. a plan log over 100,000 characters: capped, with a trimmed note
+#   p4. includePlanLog true and no plan log file: one line saying the plan
+#       text is not available, with the run link
+#   p5. a log with </details>, raw HTML and backtick runs stays inside the
+#       fence; triple backticks are replaced
+#   p6. a failed POST whose response echoes the comment: the response printed
+#       to stderr has every "##" broken up, so no logging command reaches the
+#       job log
 # Also: the bad checker case for this step reports no-user-macro-in-script.
 #
 # Usage: bash tests/pr_comment_test.sh
@@ -103,6 +114,10 @@ handler = lambda do |req, res|
                               { id: 4, parentCommentId: 3, content: 'reply' }] }
     end
     res.body = JSON.generate(value: threads, count: threads.length)
+  elsif req.request_method == 'POST' && in_threads && mode == 'echo500'
+    # A failing API that echoes the request, as some proxies do.
+    res.status = 500
+    res.body = req.body.to_s
   elsif req.request_method == 'POST' && in_threads
     res.body = JSON.generate(id: 99, comments: [{ id: 1 }])
   else
@@ -133,11 +148,13 @@ token="tok-$RANDOM-not-a-real-secret-$RANDOM"
 summary="$work/plan-summary.md"
 printf '%s\n' '### Terraform plan: `ws-demo`' '' 'Plan: 1 to add, 0 to change, 0 to destroy. "quotes" and \backslash' >"$summary"
 
-# run_case NAME MODE RUN_STATUS [SUMMARY_FILE] [PR_HEAD]: sets rc, out, err;
-# leaves requests in $work/requests.jsonl. PR_HEAD is the PR's newest source
-# commit in the fake API (default: this build's commit).
+# run_case NAME MODE RUN_STATUS [SUMMARY_FILE] [PR_HEAD] [PLAN_LOG_FILE] [INCLUDE]:
+# sets rc, out, err; leaves requests in $work/requests.jsonl. PR_HEAD is the
+# PR's newest source commit in the fake API (default: this build's commit).
+# PLAN_LOG_FILE defaults to a file that does not exist; INCLUDE to False.
 run_case() {
   local name="$1" mode="$2" run_status="$3" summary_file="${4:-$summary}" pr_head="${5:-$commit}"
+  local plan_log_file="${6:-$work/no-plan-log.txt}" include="${7:-False}"
   echo "$mode" >"$work/mode"
   echo "$pr_head" >"$work/head"
   : >"$work/requests.jsonl"
@@ -155,6 +172,7 @@ run_case() {
     RUN_STATUS="$run_status" \
     PLAN_ADD="1" PLAN_CHANGE="0" PLAN_DESTROY="0" \
     STATUS_GENRE="terraform" STATUS_NAME="tfe-plan" \
+    PLAN_LOG_FILE="$plan_log_file" INCLUDE_PLAN_LOG="$include" \
     bash "$script" >"$work/out" 2>"$work/err"
   rc=$?
   set -e
@@ -277,6 +295,96 @@ if [[ "$(count POST /threads)" == 0 && "$(count POST /statuses)" == 0 ]]; then
   pass "d: stops after the first 403"
 else
   bad "d: kept calling after 403: $(cat "$work/requests.jsonl")"
+fi
+
+# (p1) Plan log included, collapsed, triple backticks replaced.
+plan_log="$work/plan-log.txt"
+printf '%s\n' 'Terraform will perform the following actions:' '  + note = "```"' 'Plan: 1 to add, 0 to change, 0 to destroy.' >"$plan_log"
+run_case "p1" empty planned_and_finished "$summary" "$commit" "$plan_log" True
+content="$(jq -r '.comments[0].content' <<<"$(body_of POST /threads)")"
+expected_block="$(printf '<details><summary>Terraform plan</summary>\n\n```text\n%s\n%s\n%s\n```\n\n</details>' \
+  'Terraform will perform the following actions:' "  + note = \"'''\"" 'Plan: 1 to add, 0 to change, 0 to destroy.')"
+if [[ $rc -eq 0 && "$content" == "$expected_content"$'\n\n'"$expected_block" ]]; then
+  pass "p1: plan log appended after the summary in <details> and a text fence"
+else
+  bad "p1: rc=$rc content: $content"
+fi
+if [[ "$(grep -o '```' <<<"$content" | wc -l | tr -d ' ')" == 2 ]]; then
+  pass "p1: triple backticks in the log replaced; only the two fence lines remain"
+else
+  bad "p1: unexpected triple backticks in: $content"
+fi
+
+# (p2) includePlanLog false: no plan block.
+run_case "p2" empty planned_and_finished "$summary" "$commit" "$plan_log" False
+content="$(jq -r '.comments[0].content' <<<"$(body_of POST /threads)")"
+if [[ $rc -eq 0 && "$content" == "$expected_content" ]]; then
+  pass "p2: includePlanLog False leaves the plan out"
+else
+  bad "p2: rc=$rc content: $content"
+fi
+
+# (p3) A plan log over 100,000 characters is capped with a note.
+big_log="$work/big-plan-log.txt"
+for i in $(seq 1 2500); do printf '  + resource line %05d padded to about sixty characters......\n' "$i"; done >"$big_log"
+run_case "p3" empty planned_and_finished "$summary" "$commit" "$big_log" True
+content="$(jq -r '.comments[0].content' <<<"$(body_of POST /threads)")"
+plan_part="${content#*'```text'$'\n'}"
+plan_part="${plan_part%%$'\n''```'*}"
+if [[ $rc -eq 0 && ${#plan_part} -le 100000 && ${#plan_part} -gt 99000 && "$plan_part" == *"......" &&
+  "$content" == *"Plan text trimmed at 100000 characters"*"</details>" ]]; then
+  pass "p3: plan text capped at 100,000 characters (${#plan_part}), cut at a line end, with a trimmed note"
+else
+  bad "p3: rc=$rc plan part length ${#plan_part}, tail: ${content: -300}"
+fi
+
+# (p4) includePlanLog true, no plan log file: say so, with the run link.
+run_case "p4" empty planned_and_finished "$summary" "$commit" "$work/no-plan-log.txt" True
+content="$(jq -r '.comments[0].content' <<<"$(body_of POST /threads)")"
+if [[ $rc -eq 0 && "$content" == "$expected_content"$'\n\n'"Plan text not available here: see the run in TFE: https://tfe.example/app/org/workspaces/ws-demo/runs/run-abc" ]]; then
+  pass "p4: a missing plan log adds one 'not available' line with the run link"
+else
+  bad "p4: rc=$rc content: $content"
+fi
+
+# (p5) HTML and </details> in the log stay inside the fence.
+html_log="$work/html-plan-log.txt"
+printf '%s\n' '  + a = "</details>"' '  + b = "<script>alert(1)</script>"' '  + c = "<img src=x onerror=alert(2)>"' \
+  '  + d = "```"' '  + e = "````"' '  + f = "</summary><details open>"' >"$html_log"
+run_case "p5" empty planned_and_finished "$summary" "$commit" "$html_log" True
+content="$(jq -r '.comments[0].content' <<<"$(body_of POST /threads)")"
+fence_body="$(printf '%s\n' '  + a = "</details>"' '  + b = "<script>alert(1)</script>"' '  + c = "<img src=x onerror=alert(2)>"' \
+  "  + d = \"'''\"" "  + e = \"'''\`\"" '  + f = "</summary><details open>"')"
+expected_block="$(printf '<details><summary>Terraform plan</summary>\n\n```text\n%s\n```\n\n</details>' "$fence_body")"
+if [[ $rc -eq 0 && "$content" == "$expected_content"$'\n\n'"$expected_block" ]]; then
+  pass "p5: </details> and raw HTML stay inside the text fence, and the block closes after it"
+else
+  bad "p5: rc=$rc content: $content"
+fi
+if [[ "$(grep -o '```' <<<"$content" | wc -l | tr -d ' ')" == 2 ]]; then
+  pass "p5: backtick runs in the log replaced; only the two fence lines carry triple backticks"
+else
+  bad "p5: unexpected triple backticks in: $content"
+fi
+
+# (p6) A failed POST whose response echoes the comment, plan text included.
+inj_log="$work/inj-plan-log.txt"
+printf '%s\n' '##vso[task.setvariable variable=EVIL]x' '##[error]y' '##VSO[task.complete result=Failed]z' >"$inj_log"
+run_case "p6" echo500 planned_and_finished "$summary" "$commit" "$inj_log" True
+if [[ $rc -ne 0 && "$err" == *"# #vso[task.setvariable"* ]]; then
+  pass "p6: a failed call exits $rc and prints the echoed response"
+else
+  bad "p6: rc=$rc stderr: $err"
+fi
+if grep -i -q -E '##(\[|vso)' "$work/err" || grep -q '##' "$work/err"; then
+  bad "p6: a '##' from the plan text reached stderr: $(grep '##' "$work/err")"
+else
+  pass "p6: no '##' from the plan text in stderr"
+fi
+if grep -i -E '##(\[|vso)' "$work/out" | grep -v -q -E '^##vso\[task\.logissue type=error\]Azure DevOps API call failed: '; then
+  bad "p6: a logging command from the plan text reached stdout: $out"
+else
+  pass "p6: the only logging command in stdout is the step's own error"
 fi
 
 if [[ $fail -ne 0 ]]; then

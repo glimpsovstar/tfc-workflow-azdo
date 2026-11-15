@@ -130,3 +130,37 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 ## Parallelism
 
 After Task 1: Tasks 2, 3, 4 and 7 touch separate files and run as parallel subagents in separate worktrees; only the main session merges and commits. Task 5 needs 2 to 4. Task 6 needs 5. Task 8 needs 5 and 7.
+
+---
+
+### Task 10: Apply method `tfe` (the approver confirms in TFE)
+
+The customer design wants prod applies confirmed by a person in TFE. The prod pipeline then holds only a plan-permission token, so a leaked pipeline token cannot apply prod, and the approver sees the real plan and policy results in TFE. `pipeline` (Azure DevOps approval, then a pipeline apply) stays the default.
+
+**Files:** Modify `templates/pipelines/apply-run.yml`, `tests/status_sets_test.rb`, `tests/output_refs_test.rb`, `tests/alias_test.sh`, `tests/gen_reference.rb`, `docs/{setup,security,troubleshooting,reference}.md`, `README.md`, `CHANGELOG.md`. Create `tests/render.rb`, `tests/apply_method_test.rb`, `examples/azure-pipelines.main-prod.yml`.
+
+**Interfaces:**
+- `apply-run.yml`: new parameter `applyMethod` (`pipeline` default, or `tfe`). `environment` defaults to `''`; a check step fails the Plan job before upload when `applyMethod: pipeline` and `environment` is empty.
+- `tfe` mode: Plan stage only, `planVariableGroup` only, run-create gets `savePlan: false` (a confirmable run), the gate logs "Confirm and apply run <id> in TFE: <link>. The pipeline does not apply in this mode." The Apply stage, `environment` and `applyVariableGroup` are left out at compile time.
+
+- [x] Tests first: `apply_method_test.rb` renders apply-run.yml for both modes and asserts the stages, groups, savePlan and the environment check; `output_refs_test.rb` checks references in both renderings; `status_sets_test.rb` finds the Apply stage inside `${{ if }}`; alias test for `examples/azure-pipelines.main-prod.yml` (no environment, no apply group).
+- [x] Implement `applyMethod` in `apply-run.yml`; gate messages per mode.
+- [x] Decide on `waitForTfeApply` (optional): skipped (2026-11-15). tfci.yml is one tfci call per step by design, so a poll loop would duplicate its token, CA and mode handling; and a job polling for a human confirmation would hold a self-hosted agent for hours. The pipeline result is the plan's result; documented in setup.md step 11.
+- [x] Docs: setup "Production: confirm in TFE", security, troubleshooting, README, CHANGELOG, `reference.md` regenerated.
+- [x] `bash tests/run.sh` passes.
+
+### Task 11: Show the Terraform plan text in Azure DevOps
+
+tfci with `--json` sends plan logs to its internal logger, off by default, so the pipeline shows only counts and a link.
+
+**Files:** Create `templates/steps/plan-log.yml`, `tests/plan_log_test.sh`. Modify `templates/steps/pr-comment.yml`, both pipelines, `tests/pr_comment_test.sh`, `tests/run.sh`, `tests/gen_reference.rb`, docs.
+
+**Interfaces:**
+- `plan-log.yml` parameters: `planId`, `hostname`, `caBundle`, `tokenVariable`, `maxLines` (number, 300), `outputFile` (`$(Agent.TempDirectory)/plan-log.txt`), `condition`, `displayName`. GET `/api/v2/plans/<id>` with the token (`curl -K -`, header on stdin), then fetch `data.attributes.log-read-url` without the Authorization header, strip ANSI, neutralise logging commands, print the full log in `##[group]Terraform plan`, write a trimmed copy to `outputFile`.
+- `pr-comment.yml`: `planLogFile` (default `$(Agent.TempDirectory)/plan-log.txt`), `includePlanLog` (true). Appends the log in `<details><summary>Terraform plan</summary>` and a `text` fence, capped at 100,000 characters, triple backticks replaced.
+- Pipelines: parameter `showPlanLog` (true); plan-log after plan-output with `condition: and(succeededOrFailed(), ne(variables['run.PLAN_ID'], ''))`.
+
+- [x] Tests first: `plan_log_test.sh` with a fake TFE over HTTPS (WEBrick, test CA): group, ANSI stripped, trimming, Authorization to the API only, token never in output, bad planId fails. Extend `pr_comment_test.sh`: log included, collapsed, capped, backticks neutralised. Wire into `run.sh`.
+- [x] Implement `plan-log.yml`, `pr-comment.yml` changes, wire into both pipelines.
+- [x] Docs: security (what the log exposes, how to turn it off), troubleshooting (empty log, expired URL), `reference.md` regenerated, README, CHANGELOG.
+- [x] `bash tests/run.sh` passes.

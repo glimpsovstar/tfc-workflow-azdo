@@ -24,7 +24,7 @@ else
 fi
 
 # 2. The examples really reference @tfc, so step 1 checked something.
-for f in examples/azure-pipelines.pr.yml examples/azure-pipelines.main.yml; do
+for f in examples/azure-pipelines.pr.yml examples/azure-pipelines.main.yml examples/azure-pipelines.main-prod.yml; do
   if grep -Eq '^  template: templates/pipelines/[a-z-]+\.yml@tfc$' "$f"; then
     pass "$f extends a template @tfc"
   else
@@ -32,8 +32,29 @@ for f in examples/azure-pipelines.pr.yml examples/azure-pipelines.main.yml; do
   fi
 done
 
+# 2b. The tfe-mode consumer: passes applyMethod: tfe and no environment and no
+#     apply variable group, and the checker accepts it (step 1). environment
+#     has a default, so it is not reported as a missing required parameter.
+prod=examples/azure-pipelines.main-prod.yml
+if grep -Eq '^    applyMethod: tfe$' "$prod" &&
+  ! grep -Eq '^ +(environment|applyVariableGroup):' "$prod"; then
+  pass "$prod uses applyMethod: tfe with no environment and no applyVariableGroup"
+else
+  bad "$prod must pass applyMethod: tfe and no environment or applyVariableGroup"
+fi
+set +e
+out="$("${CHECKER[@]}" "$prod")"
+rc=$?
+set -e
+if [[ $rc -eq 0 && -z "$out" ]]; then
+  pass "$prod passes the checker through the alias (no required-parameter error for environment)"
+else
+  bad "$prod: expected no violations, got rc=$rc"
+  printf '%s\n' "$out"
+fi
+
 # 3. A misspelled apply-run parameter fails with param-crosscheck and both the
-#    unknown name and the missing required one are reported.
+#    unknown name and a missing required one (hostname) are reported.
 set +e
 out="$("${CHECKER[@]}" "$BAD")"
 rc=$?
@@ -41,7 +62,7 @@ set -e
 rules="$(printf '%s\n' "$out" | awk 'NF {print $2}' | sort -u)"
 if [[ $rc -eq 1 && "$rules" == "param-crosscheck" ]] &&
   grep -q "parameter 'enviroment' is not declared" <<<"$out" &&
-  grep -q "required parameter 'environment'" <<<"$out"; then
+  grep -q "required parameter 'hostname'" <<<"$out"; then
   pass "misspelled apply-run parameter is caught through the alias"
 else
   bad "bad/alias: expected param-crosscheck for 'enviroment', got rc=$rc"
