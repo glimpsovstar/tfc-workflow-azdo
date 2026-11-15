@@ -12,9 +12,10 @@
 #   - Root does the setup and the supervision. The agent and every job run as
 #     UID 1001 (user azp) through setpriv: empty bounding set, no_new_privs.
 #   - The CA bundle is root-owned and read-only, outside /azp.
-#   - run.sh --once: one job, then the agent deregisters and the container
-#     exits. The kubelet restarts it and the agent directory is wiped, so each
-#     job gets a freshly registered agent and a clean work directory.
+#   - run.sh --once: one job, then the container exits (the registration is
+#     kept so the pool is never empty; it is removed when the pod stops).
+#     The kubelet restarts the container and the agent directory is wiped,
+#     so each job gets a re-registered agent and a clean work directory.
 #   - Otherwise as Microsoft's: the token is never echoed, VSO_AGENT_IGNORE is
 #     set, and a trap removes the agent on exit with retries.
 apiVersion: v1
@@ -132,6 +133,15 @@ data:
         return 0
       fi
 
+      # After a normal one-job exit, keep the registration: an empty pool makes
+      # Azure DevOps fail queued jobs at once ("No agent found in pool"). The
+      # restart wipes the agent directory and re-registers under the same name
+      # (--replace). Deregister only when the pod is stopped (INT or TERM).
+      if [ "${DEREGISTER}" != 1 ]; then
+        echo "Job done. Keeping agent ${AGENT_NAME} registered for the next job."
+        return 0
+      fi
+
       # Deregister through the REST API from this root shell. No agent code runs
       # here: files under ${AGENT_DIR} are writable by jobs and are not trusted,
       # so the pool and agent IDs are looked up by name, and the PAT goes to curl
@@ -196,9 +206,10 @@ data:
     # Writes .env and .path for the agent from the current environment.
     as_azp ./env.sh
 
+    DEREGISTER=0
     trap "cleanup; exit 0" EXIT
-    trap "exit 130" INT
-    trap "exit 143" TERM
+    trap "DEREGISTER=1; exit 130" INT
+    trap "DEREGISTER=1; exit 143" TERM
 
     print_header "5. Configuring Azure Pipelines agent..."
 
@@ -218,8 +229,8 @@ data:
     print_header "6. Running Azure Pipelines agent for one job..."
 
     # A child of this root shell, so TERM and INT reach the traps above.
-    # --once: take one job, then exit. The EXIT trap deregisters the agent,
-    # the container exits 0, and the kubelet restarts it from step 1.
+    # --once: take one job, then exit. The container exits 0 and the kubelet
+    # restarts it from step 1 (fresh agent directory, same registration).
     as_azp ./run.sh --once &
     AGENT_PID=$!
     wait "${AGENT_PID}" || echo "agent exited with status $?"

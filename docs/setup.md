@@ -35,7 +35,7 @@ The variable name is the `tokenVariable` parameter (default `TF_API_TOKEN`). Bot
 Protect `tfc-apply`:
 
 1. **Pipeline permissions:** open the group, Pipeline permissions, and allow only the main pipeline. Do not open it to all pipelines.
-2. **Approvals and checks:** add an Approvals check, and a Branch control check with Allowed branches set to `refs/heads/main`. Turn on "Verify branch protection" if your branch policies allow it.
+2. **Approvals and checks:** add an Approvals check, and a Branch control check with Allowed branches set to `refs/heads/main,refs/tags/v2.*`. Branch control checks the ref of every repository the stage uses, including this template repository at its pinned tag, so the tag pattern must be allowed too (found in the lab run, 2026-11-15: with `refs/heads/main` alone the check fails with "Branch protection check failed."). Turn on "Verify branch protection" if your branch policies allow it.
 
 `tfc-plan` needs pipeline permission for the PR pipeline, the main pipeline and the smoke test.
 
@@ -46,7 +46,7 @@ Add a Required template check to both groups too: see [step 10](#10-required-tem
 In Pipelines, Environments, create the environment named in the `environment` parameter of `apply-run.yml` (the example uses `my-app-dev`). Under Approvals and checks add:
 
 - **Approvals:** the people who approve applies.
-- **Branch control:** Allowed branches `refs/heads/main`.
+- **Branch control:** Allowed branches `refs/heads/main,refs/tags/v2.*` (the template repository's release tags must be allowed too; see step 2).
 - **Exclusive lock:** recommended. The Apply stage sets `lockBehavior: sequential`, so with this check runs take the environment one at a time, in order. Without `lockBehavior` the default is `runLatest`, which cancels older runs. Microsoft: [Exclusive lock](https://learn.microsoft.com/azure/devops/pipelines/process/approvals?view=azure-devops#exclusive-lock) ("This can be specified for the whole pipeline or for a given stage").
 
 The Apply stage is a deployment job on this environment, so it waits for these checks before it touches the apply token's variable group.

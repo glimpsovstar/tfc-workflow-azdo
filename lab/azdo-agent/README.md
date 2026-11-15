@@ -70,7 +70,7 @@ kubectl apply -f lab/azdo-agent/deployment.yaml
 5. Wipe `/azp/agent`, including `_work`, download and extract the agent there, then `chown -R azp:azp /azp/agent`.
 6. Export `PATH` (with `/opt/tools/bin` for `tfci`), then configure the agent as `azp` through `setpriv`: UID and GID 1001, empty capability bounding set, `no_new_privs`.
 7. Run `./run.sh --once` as `azp`, as a child of the root shell, and wait. The agent takes one job, then exits.
-8. An `EXIT` trap in the root shell stops the agent if it is still running, kills any leftover UID 1001 process, keeps killing until none remain, then deregisters the agent through the Azure DevOps REST API from the root shell (pool and agent looked up by name, PAT on curl's stdin, up to 10 retries), and exits 0. No agent code runs while the PAT is in use, because jobs can write the agent's files.
+8. An `EXIT` trap in the root shell stops the agent if it is still running, kills any leftover UID 1001 process, keeps killing until none remain. After a normal one-job exit it keeps the registration (an empty pool makes Azure DevOps fail queued jobs at once with "No agent found in pool"). Only when the pod is stopped (SIGTERM or SIGINT) does it deregister the agent through the Azure DevOps REST API from the root shell (pool and agent looked up by name, PAT on curl's stdin, up to 10 retries), and exits 0. No agent code runs while the PAT is in use, because jobs can write the agent's files.
 
 The kubelet restarts the container and the sequence starts again at step 1. Each job gets a freshly registered agent and a clean work directory.
 
@@ -82,7 +82,7 @@ flowchart TD
   setup --> wipe["Wipe /azp/agent, download agent, chown to azp"]
   wipe --> config["config.sh as UID 1001 (setpriv)"]
   config --> run["run.sh --once as UID 1001"]
-  run -->|"one job done, or SIGTERM"| cleanup["Root trap: kill UID 1001 processes, deregister via REST API"]
+  run -->|"one job done, or SIGTERM"| cleanup["Root trap: kill UID 1001 processes; on SIGTERM only, deregister via REST API"]
   cleanup -->|"exit 0, kubelet restarts the container"| start
 ```
 
@@ -112,7 +112,7 @@ kubectl -n azdo-agents rollout status deploy/azdo-agent
 kubectl -n azdo-agents logs deploy/azdo-agent -c agent -f
 ```
 
-The log shows steps 1 to 6 of `start.sh`, then `Listening for Jobs`. After each job the agent deregisters, the container restarts and the agent registers again; the pod's restart count goes up by one per job. In Azure DevOps, open Organisation settings, Agent pools, `lab-aks`, Agents: the agent is named after the pod and shows **Online**.
+The log shows steps 1 to 6 of `start.sh`, then `Listening for Jobs`. After each job the container restarts, the agent directory is wiped and the agent registers again under the same name (`--replace`), so the pool is never empty; the pod's restart count goes up by one per job. In Azure DevOps, open Organisation settings, Agent pools, `lab-aks`, Agents: the agent is named after the pod and shows **Online**.
 
 Check `tfci`, the CA and the job user from inside the pod. The `setpriv` line runs the check as UID 1001, as a job would:
 

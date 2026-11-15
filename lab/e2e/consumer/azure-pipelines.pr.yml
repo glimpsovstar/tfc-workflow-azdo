@@ -1,0 +1,25 @@
+# lab consumer: PR validation (speculative plan, comment on the PR).
+# Run through branch policy build validation on main, not a YAML pr: trigger.
+trigger: none
+pr: none
+
+resources:
+  repositories:
+    - repository: tfc
+      type: git
+      name: lab-project/tfc-workflow-azdo
+      ref: refs/tags/v2.0.0-rc.1
+
+extends:
+  template: templates/pipelines/speculative-run.yml@tfc
+  parameters:
+    workspace: lab-app
+    organization: my-org
+    hostname: tfe.lab.internal
+    pool:
+      name: lab-aks
+    mode: native
+    caBundle: /etc/tfe-ca/ca.pem
+    # The lab agent has no terraform or tflint binaries; validate is covered by
+    # tests/run.sh. A production agent image would include them.
+    enableValidate: false
