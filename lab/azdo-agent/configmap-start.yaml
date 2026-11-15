@@ -7,13 +7,16 @@
 # Adapted from Microsoft's script:
 #   - PAT only. The service principal path (AZP_CLIENTID, az login) is removed
 #     because the lab pod has no Azure CLI and registers with a PAT.
-#   - TARGETARCH defaults to linux-x64 (Microsoft sets it in the Dockerfile).
-#   - The token file lives next to the script in /azp (a writable emptyDir),
-#     because this ConfigMap is mounted read-only.
-#   - Otherwise unchanged: the token is never echoed, it is written to a 0600
-#     file and AZP_TOKEN is unset before the agent runs, VSO_AGENT_IGNORE hides
-#     the token variables from jobs, and a trap removes the agent on exit.
-#   - Command substitutions quoted and [ -o ] split, to pass shellcheck.
+#   - The PAT is a file in a 0400 root-owned secret volume, never an env var.
+#     It is read into an unexported shell variable in this root shell only.
+#   - Root does the setup and the supervision. The agent and every job run as
+#     UID 1001 (user azp) through setpriv: empty bounding set, no_new_privs.
+#   - The CA bundle is root-owned and read-only, outside /azp.
+#   - run.sh --once: one job, then the agent deregisters and the container
+#     exits. The kubelet restarts it and the agent directory is wiped, so each
+#     job gets a freshly registered agent and a clean work directory.
+#   - Otherwise as Microsoft's: the token is never echoed, VSO_AGENT_IGNORE is
+#     set, and a trap removes the agent on exit with retries.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -24,106 +27,123 @@ metadata:
 data:
   start.sh: |
     #!/bin/bash
-    set -e
+    # Runs as root (PID 1). Root only sets up and supervises; the agent and
+    # all job code run as UID 1001.
+    set -euo pipefail
 
     TARGETARCH="${TARGETARCH:-linux-x64}"
-
-    # Load the token from AZP_TOKEN or AZP_TOKEN_FILE. The token goes into a
-    # 0600 file and AZP_TOKEN is unset, so job processes never inherit it.
-    load_azp_token() {
-      if [ -z "${AZP_TOKEN_FILE}" ]; then
-        if [ -z "${AZP_TOKEN}" ]; then
-          echo 1>&2 "error: missing AZP_TOKEN environment variable"
-          exit 1
-        fi
-
-        AZP_TOKEN_FILE="$(dirname "$0")/.token"
-      fi
-
-      if [ -n "${AZP_TOKEN-}" ]; then
-        if [ -d "${AZP_TOKEN_FILE}" ]; then
-          echo 1>&2 "error: AZP_TOKEN_FILE is a directory, expected a file path: ${AZP_TOKEN_FILE}"
-          exit 1
-        fi
-        if [ -e "${AZP_TOKEN_FILE}" ]; then
-          if [ ! -w "${AZP_TOKEN_FILE}" ]; then
-            echo 1>&2 "error: existing AZP_TOKEN_FILE is not writable: ${AZP_TOKEN_FILE}"
-            exit 1
-          fi
-        else
-          if [ ! -w "$(dirname "${AZP_TOKEN_FILE}")" ]; then
-            echo 1>&2 "error: AZP_TOKEN_FILE parent directory is missing or not writable: $(dirname "${AZP_TOKEN_FILE}")"
-            exit 1
-          fi
-        fi
-        (umask 177 && echo -n "${AZP_TOKEN}" > "${AZP_TOKEN_FILE}")
-        chmod 600 "${AZP_TOKEN_FILE}" || true
-      else
-        if [ ! -r "${AZP_TOKEN_FILE}" ]; then
-          echo 1>&2 "error: AZP_TOKEN_FILE is not readable: ${AZP_TOKEN_FILE}"
-          exit 1
-        fi
-        if [ ! -s "${AZP_TOKEN_FILE}" ]; then
-          echo 1>&2 "error: AZP_TOKEN_FILE is empty: ${AZP_TOKEN_FILE}"
-          exit 1
-        fi
-      fi
-
-      # From here on the token is only in the file.
-      unset AZP_TOKEN
-    }
-
-    # Remove the agent registration from the pool when the pod stops.
-    cleanup() {
-      trap "" EXIT
-
-      if [ -e ./config.sh ]; then
-        print_header "Cleanup. Removing Azure Pipelines agent..."
-
-        # A running job makes removal fail, so retry for a while.
-        max_attempts=10
-        attempt=1
-        while [ $attempt -le $max_attempts ]; do
-          ./config.sh remove --unattended --auth "PAT" --token "$(cat "${AZP_TOKEN_FILE}")" && break
-
-          echo "Attempt $attempt failed. Retrying in 30 seconds..."
-          attempt=$((attempt+1))
-          sleep 30
-        done
-        if [ $attempt -gt $max_attempts ]; then
-          echo 1>&2 "warning: failed to remove agent configuration after $max_attempts attempts"
-        fi
-      fi
-    }
+    AZP_UID=1001
+    AZP_HOME=/home/azp
+    AGENT_DIR=/azp/agent
+    SECRET_DIR=/etc/azp-secret
+    CA_DIR=/etc/azp-ca
+    CA_BUNDLE="${CA_DIR}/bundle.pem"
+    AGENT_PID=""
 
     print_header() {
-      lightcyan="\033[1;36m"
-      nocolor="\033[0m"
+      local lightcyan="\033[1;36m"
+      local nocolor="\033[0m"
       echo -e "\n${lightcyan}$1${nocolor}\n"
     }
 
-    if [ -z "${AZP_URL}" ]; then
-      echo 1>&2 "error: missing AZP_URL environment variable"
+    # Run a command as azp: real, effective and saved UID/GID 1001, empty
+    # capability bounding set, no_new_privs. The environment (PATH,
+    # SSL_CERT_FILE and so on) is inherited, with HOME set to azp's home.
+    as_azp() {
+      setpriv --reuid="${AZP_UID}" --regid="${AZP_UID}" --init-groups \
+        --bounding-set=-all --no-new-privs \
+        env HOME="${AZP_HOME}" USER=azp LOGNAME=azp "$@"
+    }
+
+    print_header "1. Installing packages (lab only)..."
+
+    # LAB ONLY: packages are installed at every start. Production bakes an
+    # image with these, the agent and tfci into an internal registry.
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq --no-install-recommends \
+      curl jq git ca-certificates libicu74 procps
+    rm -rf /var/lib/apt/lists/*
+
+    print_header "2. Creating user azp and the CA bundle..."
+
+    if ! id azp >/dev/null 2>&1; then
+      useradd --uid "${AZP_UID}" --user-group --create-home \
+        --home-dir "${AZP_HOME}" --shell /usr/sbin/nologin azp
+    fi
+
+    # One CA bundle: the public roots (Azure DevOps, agent download) plus the
+    # lab TFE CA. Root-owned 0444 in a root-owned 0755 directory, so UID 1001
+    # can read it but not change it. SSL_CERT_FILE and NODE_EXTRA_CA_CERTS
+    # point here.
+    install -d -o root -g root -m 0755 "${CA_DIR}"
+    cat /etc/ssl/certs/ca-certificates.crt /etc/tfe-ca/ca.pem > "${CA_BUNDLE}.tmp"
+    chown root:root "${CA_BUNDLE}.tmp"
+    chmod 0444 "${CA_BUNDLE}.tmp"
+    mv -f "${CA_BUNDLE}.tmp" "${CA_BUNDLE}"
+
+    # tfci comes from the init container on a read-only mount. Export PATH
+    # before any setpriv call, so the agent and its jobs inherit it.
+    export PATH="/opt/tools/bin:${PATH}"
+    command -v tfci
+
+    # Connection settings and the PAT come from the 0400 root-owned secret
+    # volume. TOKEN is a plain shell variable: not exported, never echoed, so
+    # no child process inherits it and UID 1001 cannot read it.
+    AZP_URL="$(< "${SECRET_DIR}/url")"
+    AZP_POOL="$(< "${SECRET_DIR}/pool")"
+    TOKEN="$(< "${SECRET_DIR}/token")"
+    if [ -z "${AZP_URL}" ] || [ -z "${TOKEN}" ]; then
+      echo 1>&2 "error: ${SECRET_DIR} must hold non-empty url and token files"
       exit 1
     fi
 
-    load_azp_token
+    # Remove the agent registration from the pool. Runs in this root shell,
+    # which still holds TOKEN.
+    cleanup() {
+      trap "" EXIT INT TERM
 
-    if [ -n "${AZP_WORK}" ]; then
-      mkdir -p "${AZP_WORK}"
-    fi
+      # Stop the agent if it is still running (pod deleted mid-job), giving
+      # it up to 60 seconds to cancel the job and exit.
+      if [ -n "${AGENT_PID}" ] && kill -0 "${AGENT_PID}" 2>/dev/null; then
+        kill -INT "${AGENT_PID}" 2>/dev/null || true
+        for _ in $(seq 1 60); do
+          kill -0 "${AGENT_PID}" 2>/dev/null || break
+          sleep 1
+        done
+      fi
 
-    # Tell the agent not to pass the token variables to jobs.
-    export VSO_AGENT_IGNORE="AZP_TOKEN,AZP_TOKEN_FILE"
+      # Kill anything a job left behind as UID 1001, so no job process is
+      # alive to read the token from config.sh's argv below.
+      pkill -KILL -u "${AZP_UID}" 2>/dev/null || true
 
-    print_header "1. Determining matching Azure Pipelines agent..."
+      if [ -e "${AGENT_DIR}/.agent" ]; then
+        print_header "Cleanup. Removing Azure Pipelines agent..."
 
-    AZP_AGENT_PACKAGES=$(curl -LsS \
-        -u "user:$(cat "${AZP_TOKEN_FILE}")" \
-        -H "Accept:application/json" \
-        "${AZP_URL}/_apis/distributedtask/packages/agent?platform=${TARGETARCH}&top=1")
+        cd "${AGENT_DIR}"
+        local max_attempts=10
+        local attempt=1
+        while [ "${attempt}" -le "${max_attempts}" ]; do
+          as_azp ./config.sh remove --unattended --auth PAT --token "${TOKEN}" && break
 
-    AZP_AGENT_PACKAGE_LATEST_URL=$(echo "${AZP_AGENT_PACKAGES}" | jq -r ".value[0].downloadUrl")
+          echo "Attempt ${attempt} failed. Retrying in 30 seconds..."
+          attempt=$((attempt+1))
+          sleep 30
+        done
+        if [ "${attempt}" -gt "${max_attempts}" ]; then
+          echo 1>&2 "warning: failed to remove agent configuration after ${max_attempts} attempts"
+        fi
+      fi
+    }
+
+    print_header "3. Determining matching Azure Pipelines agent..."
+
+    # The PAT goes to curl on stdin (a curl config), not in argv.
+    AZP_AGENT_PACKAGES="$(printf 'user = "user:%s"\n' "${TOKEN}" | curl -LsS -K - \
+      -H "Accept:application/json" \
+      "${AZP_URL}/_apis/distributedtask/packages/agent?platform=${TARGETARCH}&top=1")"
+
+    AZP_AGENT_PACKAGE_LATEST_URL="$(echo "${AZP_AGENT_PACKAGES}" | jq -r ".value[0].downloadUrl")"
 
     if [ -z "${AZP_AGENT_PACKAGE_LATEST_URL}" ] || [ "${AZP_AGENT_PACKAGE_LATEST_URL}" == "null" ]; then
       echo 1>&2 "error: could not determine a matching Azure Pipelines agent"
@@ -131,32 +151,52 @@ data:
       exit 1
     fi
 
-    print_header "2. Downloading and extracting Azure Pipelines agent..."
+    print_header "4. Downloading and extracting Azure Pipelines agent..."
 
-    curl -LsS "${AZP_AGENT_PACKAGE_LATEST_URL}" | tar -xz & wait $!
+    # The /azp emptyDir survives a container restart, so wipe the agent and
+    # its _work directory: nothing a previous job wrote is kept.
+    chown root:root /azp
+    chmod 0755 /azp
+    rm -rf "${AGENT_DIR}"
+    install -d -o root -g root -m 0755 "${AGENT_DIR}"
+    curl -LsS "${AZP_AGENT_PACKAGE_LATEST_URL}" | tar -xz -C "${AGENT_DIR}"
+    mkdir -p "${AGENT_DIR}/_work"
+    # The agent writes its config, credentials and _diag here, so azp owns
+    # it. The CA bundle and the secret stay outside /azp.
+    chown -R azp:azp "${AGENT_DIR}"
+    cd "${AGENT_DIR}"
 
-    # shellcheck disable=SC1091 # env.sh comes with the agent package
-    . ./env.sh
+    # Keep setup variables out of the agent's capabilities. No secret is in
+    # the environment any more; this mirrors Microsoft's script.
+    export VSO_AGENT_IGNORE="AZP_AGENT_NAME,TARGETARCH"
+
+    # Writes .env and .path for the agent from the current environment.
+    as_azp ./env.sh
 
     trap "cleanup; exit 0" EXIT
-    trap "cleanup; exit 130" INT
-    trap "cleanup; exit 143" TERM
+    trap "exit 130" INT
+    trap "exit 143" TERM
 
-    print_header "3. Configuring Azure Pipelines agent..."
+    print_header "5. Configuring Azure Pipelines agent..."
 
-    ./config.sh --unattended \
+    # The PAT is in config.sh's argv while it runs, as in Microsoft's script.
+    # No job is running yet, and /proc/<pid>/cmdline of this process is only
+    # visible inside the container.
+    as_azp ./config.sh --unattended \
       --agent "${AZP_AGENT_NAME:-$(hostname)}" \
       --url "${AZP_URL}" \
-      --auth "PAT" \
-      --token "$(cat "${AZP_TOKEN_FILE}")" \
+      --auth PAT \
+      --token "${TOKEN}" \
       --pool "${AZP_POOL:-Default}" \
-      --work "${AZP_WORK:-_work}" \
+      --work "${AGENT_DIR}/_work" \
       --replace \
-      --acceptTeeEula & wait $!
+      --acceptTeeEula
 
-    print_header "4. Running Azure Pipelines agent..."
+    print_header "6. Running Azure Pipelines agent for one job..."
 
-    chmod +x ./run.sh
-
-    # Run in the background and wait, so TERM and INT reach the traps above.
-    ./run.sh "$@" & wait $!
+    # A child of this root shell, so TERM and INT reach the traps above.
+    # --once: take one job, then exit. The EXIT trap deregisters the agent,
+    # the container exits 0, and the kubelet restarts it from step 1.
+    as_azp ./run.sh --once &
+    AGENT_PID=$!
+    wait "${AGENT_PID}" || echo "agent exited with status $?"

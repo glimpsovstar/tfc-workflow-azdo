@@ -31,15 +31,17 @@ spec:
       # The agent never talks to the Kubernetes API.
       automountServiceAccountToken: false
       enableServiceLinks: false
-      # start.sh retries agent removal while a job finishes. Give it time.
-      terminationGracePeriodSeconds: 330
+      # On SIGTERM start.sh gives a running job up to 60s to stop, then
+      # retries agent removal up to 10 times, 30s apart. Give it time.
+      terminationGracePeriodSeconds: 390
       securityContext:
         seccompProfile:
           type: RuntimeDefault
 
       initContainers:
         # Copies the static tfci binary out of the pinned image into a shared
-        # emptyDir. Runs as non-root with a read-only root filesystem.
+        # emptyDir. Runs as non-root with a read-only root filesystem. The
+        # agent container mounts it read-only, so nothing there can change it.
         - name: tfci
           image: hashicorp/tfci:v1.4.0
           imagePullPolicy: IfNotPresent
@@ -70,79 +72,49 @@ spec:
           image: ubuntu:24.04
           imagePullPolicy: IfNotPresent
           workingDir: /azp
-          command:
-            - /bin/bash
-            - -c
-            - |
-              set -euo pipefail
-
-              # LAB ONLY: packages are installed at every start. Production
-              # bakes an image with these and tfci into an internal registry.
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update -qq
-              apt-get install -y -qq --no-install-recommends \
-                curl jq git ca-certificates libicu74
-              rm -rf /var/lib/apt/lists/*
-
-              # One CA bundle: the public roots (Azure DevOps, agent download)
-              # plus the lab TFE CA. SSL_CERT_FILE points here.
-              cat /etc/ssl/certs/ca-certificates.crt /etc/tfe-ca/ca.pem \
-                > "${SSL_CERT_FILE}"
-
-              export PATH="/opt/tools/bin:${PATH}"
-              command -v tfci
-
-              cp /opt/azp-start/start.sh /azp/start.sh
-              chmod 0700 /azp/start.sh
-              exec /azp/start.sh
+          # start.sh runs as root and is PID 1. It installs packages, builds
+          # the CA bundle, then runs the agent and its jobs as UID 1001.
+          command: ["/bin/bash", "/opt/azp-start/start.sh"]
+          # No secret is in the environment. URL, pool and PAT are files in
+          # the azp-secret volume, readable only by root.
           env:
-            - name: AZP_URL
-              valueFrom:
-                secretKeyRef:
-                  name: azdo-agent
-                  key: url
-            - name: AZP_POOL
-              valueFrom:
-                secretKeyRef:
-                  name: azdo-agent
-                  key: pool
-            - name: AZP_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: azdo-agent
-                  key: token
             - name: AZP_AGENT_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: AZP_WORK
-              value: /azp/_work
             - name: TARGETARCH
               value: linux-x64
-            # LAB ONLY: the agent refuses to configure as root without this.
-            # A baked production image runs as a non-root user instead.
-            - name: AGENT_ALLOW_RUNASROOT
-              value: "1"
             # Go's crypto/x509 reads SSL_CERT_FILE, so tfci trusts the lab CA
-            # without changing the system store. The file is the public roots
-            # plus /etc/tfe-ca/ca.pem, built at start. It cannot be the lab CA
-            # alone: curl and the agent read SSL_CERT_FILE too, and would then
-            # fail to reach Azure DevOps.
+            # without changing the system store. Node-based tasks read
+            # NODE_EXTRA_CA_CERTS. The file is the public roots plus
+            # /etc/tfe-ca/ca.pem, built at start, root-owned and 0444. It
+            # cannot be the lab CA alone: curl and the agent read
+            # SSL_CERT_FILE too, and would then fail to reach Azure DevOps.
             - name: SSL_CERT_FILE
-              value: /azp/ca-bundle.pem
+              value: /etc/azp-ca/bundle.pem
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/azp-ca/bundle.pem
             - name: TF_HOSTNAME
               value: tfe.lab.internal
           securityContext:
-            # LAB ONLY: root because apt runs at start. A baked image runs
+            # LAB ONLY: the container starts as root because start.sh runs
+            # apt, useradd, chown and setpriv. Root only does setup and
+            # supervision; the agent and jobs run as UID 1001 with an empty
+            # bounding set and no_new_privs. A baked production image runs
             # with runAsNonRoot: true and drops ALL capabilities.
             runAsUser: 0
             privileged: false
+            # setpriv dropping to UID 1001 works with this set.
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-              # The minimum apt and dpkg need to install packages and switch
-              # to the _apt user. All are in the Pod Security baseline set.
-              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID"]
+              # CHOWN, DAC_OVERRIDE, FOWNER, FSETID, SETUID, SETGID: apt,
+              # dpkg, useradd and chown. SETUID, SETGID: setpriv switching to
+              # UID 1001. SETPCAP: setpriv emptying the bounding set (without
+              # it the drop is silently skipped). KILL: root stopping the
+              # UID 1001 agent and stray job processes at cleanup. All are in
+              # the Pod Security baseline set. None reach UID 1001.
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID", "SETPCAP", "KILL"]
           resources:
             requests:
               cpu: 250m
@@ -160,11 +132,14 @@ spec:
             - name: tfe-ca
               mountPath: /etc/tfe-ca
               readOnly: true
+            - name: azp-secret
+              mountPath: /etc/azp-secret
+              readOnly: true
             - name: azp
               mountPath: /azp
 
-      # No hostPath and no Docker socket: only emptyDirs, a ConfigMap script
-      # and the CA ConfigMap.
+      # No hostPath and no Docker socket: only emptyDirs, a ConfigMap script,
+      # the CA ConfigMap and the agent secret.
       volumes:
         - name: tools-bin
           emptyDir: {}
@@ -174,6 +149,12 @@ spec:
           configMap:
             name: azdo-agent-start
             defaultMode: 0444
+        # Keys url, pool and token become root-owned 0400 files. UID 1001
+        # cannot read them.
+        - name: azp-secret
+          secret:
+            secretName: azdo-agent
+            defaultMode: 0400
         - name: tfe-ca
           configMap:
             name: tfe-ca
