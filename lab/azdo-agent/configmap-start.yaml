@@ -261,6 +261,10 @@ data:
         find "${d}" -xdev -mindepth 1 -user "${AZP_UID}" -prune -exec rm -rf {} + 2>/dev/null || true
       done
       find / -xdev -user "${AZP_UID}" -not -path "${AZP_HOME}" -prune -exec rm -rf {} + 2>/dev/null || true
+      # SysV and POSIX IPC objects outlive their processes. Nothing else in this
+      # container uses IPC, so clear all of it.
+      ipcrm --all 2>/dev/null || true
+      find /dev/mqueue -mindepth 1 -user "${AZP_UID}" -delete 2>/dev/null || true
       rm -rf "${AGENT_DIR}"
       install -d -o root -g root -m 0755 "${AGENT_DIR}"
       tar -xzf "${AGENT_TARBALL}" -C "${AGENT_DIR}"
