@@ -111,12 +111,12 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 
 ### Task 8: End to end in the lab (with David)
 
-- [ ] David: Azure DevOps org/project, agent pool `lab-aks`, PAT secret, repos (template repo and a consumer repo with the fixture), variable groups and their secrets, environment `lab-prod` with approval.
-- [ ] Apply the agent, confirm it is online.
-- [ ] PR: speculative run on the PR's own configuration version, thread and status posted. Two PRs at once (Review Focus 3). Push twice to one PR (Review Focus 4).
-- [ ] Merge: plan, approval, apply. A no-change merge (Review Focus 2).
-- [ ] Wrong CA bundle: TLS failure (Review Focus 5).
-- [ ] Record evidence in `docs/PROOF.md` (run IDs and statuses only, no secrets, no tenant IDs). Commit.
+- [x] David: Azure DevOps org/project, agent pool `lab-aks`, PAT secret, repos (template repo and a consumer repo with the fixture), variable groups and their secrets, environment `lab-prod` with approval.
+- [x] Apply the agent, confirm it is online.
+- [x] PR: speculative run on the PR's own configuration version, thread and status posted. Two PRs at once (Review Focus 3). Push twice to one PR (Review Focus 4).
+- [x] Merge: plan, approval, apply. A no-change merge (Review Focus 2).
+- [x] Wrong CA bundle: TLS failure (Review Focus 5).
+- [x] Record evidence in `docs/PROOF.md` (run IDs and statuses only, no secrets, no tenant IDs). Commit.
 
 ### Task 9: Whole-branch review
 
@@ -124,7 +124,7 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 
 ## Status (2026-11-15)
 
-- [x] Task 1 to 7 done. - [ ] Task 8 end to end (needs David). - [x] Task 9 fixes and re-review.
+- [x] Task 1 to 7 done. - [x] Task 8 end to end (2026-11-15, docs/PROOF.md). - [x] Task 9 fixes and re-review.
 - Deviation: Tasks 2, 3, 4 and 7 ran in parallel in one working tree on disjoint files, committed by path, not in separate worktrees.
 
 ## Parallelism

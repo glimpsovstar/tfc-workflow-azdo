@@ -4,6 +4,7 @@
 Rebuild tfc-workflow-azdo (v2) so Azure DevOps PR and main pipelines drive HCP Terraform or Terraform Enterprise correctly through tfci, including private TFE with no ingress, private CA, internal images and split plan/apply tokens. Proven end to end against the lab TFE.
 
 ## Done
+- 2026-11-15: Task 8 end to end in the lab (Azure DevOps project `lab-project` in org `my-azdo-org`, TFE 2.1.1). 10 checks pass; record in `docs/PROOF.md`. Found and fixed: empty agent pool, branch control with a template tag, discarded saved plans. Templates pushed to Azure Repos at tag `v2.0.0-rc.1`.
 - 2026-11-15: Task 9 whole-branch review (13 findings) fixed in `d454cf3`, then an independent review of the fixes (rule 7) found the token on argv in native mode and unsourced claims; fixed in the same commit. 14 checks in `tests/run.sh` pass. Terraform 1.17.0 refuses a stale saved plan (tested locally).
 - 2026-11-15: Task 2 tfci wrapper and run steps (`f38fbb7`). CA via `SSL_CERT_DIR` (private CA alone works; tested with the real tfci image against a local TLS server). `textArgs` passes values with spaces as one literal argument.
 - 2026-11-15: Task 3 PR comment step (`658aac5`, `0885bf6`): updates only a marker thread written by the build identity; fake-API test in `tests/run.sh`.
@@ -13,12 +14,12 @@ Rebuild tfc-workflow-azdo (v2) so Azure DevOps PR and main pipelines drive HCP T
 - 2026-11-15: Full three-reviewer review; spec and plan. Branch `djoo/modernise`.
 
 ## In progress
-- Waiting on David for Task 8 prerequisites.
+- Nothing. Lab resources still running (see Next).
 
 ## Next
-1. Task 6 docs and changelog.
-2. Task 8 end to end in the lab with David: he supplies the Azure DevOps org and project, the agent pool, the agent PAT (creates the k8s secret himself), the TFE team tokens (enters them into the variable groups himself), and approval to push to Azure Repos. Confirm in Azure DevOps: server-side compile (relative ../steps paths via @tfc, format() env keys, lockBehavior, deployment-job stageDependencies variables, stage-condition dependencies syntax); connectionData id equals comment author id; tfci run apply on a planned_and_saved run; TFE refuses a stale saved plan; policy and run-task statuses; wrong CA gives x509; lab agent register and deregister; Required template checks. Tag v2.0.0 before pushing so the examples' ref resolves.
-3. Task 9 whole-branch review.
+1. Decide the release: tag `v2.0.0` and push to GitHub (only when David asks).
+2. Lab clean-up when done: delete Azure DevOps project `lab-project` (or keep for demos), the TFE workspace `lab-app`, teams `azdo-plan` and `azdo-apply`, policy set `lab-e2e`, and the `azdo-agents` namespace. TFE team tokens and the agent PAT expire 2026-11-22.
+3. Open question for David: a soft-mandatory policy failure on a PR sets the PR status to failed but the build passes, so the merge is not blocked unless a status policy requires `terraform/tfe-plan`. Recommend adding that status policy, or failing the build on soft failure.
 
 ## Key context
 - Spec: `docs/superpowers/specs/2026-11-15-modernise-design.md`. Plan: `docs/superpowers/plans/2026-11-15-modernise.md`.
