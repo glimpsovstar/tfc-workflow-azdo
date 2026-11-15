@@ -120,14 +120,21 @@ steps:
       fi
       content="${marker}"$'\n'"${summary}"
 
-      # Find our own thread: the first comment of a live thread carries the marker.
+      # Who is this build? Only threads whose first comment was written by this
+      # identity count as ours, so a marker pasted by someone else is ignored.
+      api GET "${COLLECTION_URI%/}/_apis/connectionData"
+      me="$(jq -r '.authenticatedUser.id // empty' "$resp")"
+
+      # Find our own thread: the first comment of a live thread, written by us,
+      # carries the marker.
       api GET "$base/threads?api-version=$api_version"
-      found="$(jq -r --arg m "$marker" '
+      found="$(jq -r --arg m "$marker" --arg me "$me" '
         [ (.value // [])[]
           | select((.isDeleted // false) | not)
           | select((.comments // []) | length > 0)
           | { tid: .id, c: (.comments | sort_by(.id) | .[0]) }
           | select((.c.isDeleted // false) | not)
+          | select($me != "" and (.c.author.id // "") == $me)
           | select((.c.content // "") | contains($m)) ]
         | first // empty
         | "\(.tid) \(.c.id)"' "$resp")"

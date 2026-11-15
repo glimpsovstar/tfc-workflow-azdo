@@ -71,14 +71,23 @@ handler = lambda do |req, res|
     res.body = JSON.generate(message: 'TF401027: You need the Git permission PullRequestContribute')
     next res
   end
+  if raw_path.end_with?('/_apis/connectionData')
+    res.body = JSON.generate(authenticatedUser: { id: 'build-identity-id' })
+    next res
+  end
   in_threads = raw_path.end_with?('/threads')
   if req.request_method == 'GET' && in_threads
     threads = [
       { id: 7, comments: [{ id: 1, parentCommentId: 0, content: 'Policy: build succeeded', commentType: 'system' }] }
     ]
+    # A thread someone else wrote, carrying our marker: must never be treated as ours.
+    threads << { id: 41, isDeleted: false, status: 'active',
+                 comments: [{ id: 2, parentCommentId: 0, commentType: 'text', author: { id: 'someone-else' },
+                              content: "<!-- tfc-workflow-azdo:ws-demo -->\nspoofed" }] }
     if mode == 'existing'
       threads << { id: 42, isDeleted: false, status: 'active',
                    comments: [{ id: 3, parentCommentId: 0, commentType: 'text',
+                                author: { id: 'build-identity-id' },
                                 content: "<!-- tfc-workflow-azdo:ws-demo -->\nold plan" },
                               { id: 4, parentCommentId: 3, content: 'reply' }] }
     end
@@ -150,17 +159,17 @@ base_path="/org/My%20Project/_apis/git/repositories/0f2e0c4a-1111-2222-3333-4444
 # (a) No thread yet.
 run_case "a" empty planned
 if [[ $rc -eq 0 && "$(count GET /threads)" == 1 && "$(count POST /threads)" == 1 && "$(count PATCH /comments/1)" == 0 && "$(count POST /statuses)" == 1 ]]; then
-  pass "a: one GET, one POST to threads, one POST to statuses"
+  pass "a: one GET, one POST to threads, one POST to statuses (marker thread by someone else ignored)"
 else
   bad "a: rc=$rc requests: $(cat "$work/requests.jsonl") stdout: $out stderr: $err"
 fi
 methods="$(jq -s -r '[.[] | .method + " " + .path] | join(",")' "$work/requests.jsonl")"
-if [[ "$methods" == "GET $base_path/threads,POST $base_path/threads,POST $base_path/statuses" ]]; then
+if [[ "$methods" == "GET /org/_apis/connectionData,GET $base_path/threads,POST $base_path/threads,POST $base_path/statuses" ]]; then
   pass "a: request order and URL (project URL-encoded, plain http kept)"
 else
   bad "a: unexpected requests: $methods"
 fi
-if jq -s -e '.[] | select(.query != "api-version=7.1")' "$work/requests.jsonl" >/dev/null; then
+if jq -s -e '.[] | select((.path | endswith("/_apis/connectionData") | not) and .query != "api-version=7.1")' "$work/requests.jsonl" >/dev/null; then
   bad "a: a request does not use api-version=7.1"
 else
   pass "a: every request uses api-version=7.1"
