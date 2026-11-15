@@ -8,7 +8,7 @@ resources:
     - repository: tfc
       type: git
       name: lab-project/tfc-workflow-azdo
-      ref: refs/tags/v2.0.0-rc.2
+      ref: refs/tags/v2.0.0-rc.3
 
 extends:
   template: templates/pipelines/speculative-run.yml@tfc
