@@ -28,5 +28,6 @@ Rebuild tfc-workflow-azdo (v2) so Azure DevOps PR and main pipelines drive HCP T
 - Tests: `tests/run.sh` (from Task 1).
 
 ## Corrections
+- 2026-11-15: Rules check found gaps: docs were left to the end (Task 6) instead of updated in each task, plan ticks were not kept, and tasks got no independent review until the end. From now on: every change updates its docs, ticks its plan item, and gets an independent reviewer before commit.
 - 2026-11-15: While parallel agents have staged changes, commit by path only (`git commit -- <paths>`). A plain commit swept another task's staged moves into the Task 7 commit.
 - 2026-11-15: Check tfci flag placement against source, not memory: `--json` goes after the command.
