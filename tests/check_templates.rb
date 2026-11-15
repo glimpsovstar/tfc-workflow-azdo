@@ -3,7 +3,12 @@
 
 # Static checks over Azure Pipelines YAML templates.
 #
-# Usage: ruby tests/check_templates.rb [--manifest FILE] [paths...]
+# Usage: ruby tests/check_templates.rb [--manifest FILE] [--alias NAME=DIR]... [paths...]
+#
+# --alias NAME=DIR resolves template references `path@NAME` to DIR/path, so
+# param-crosscheck also covers callers that pin this repo as a repository
+# resource (`--alias tfc=.` checks the examples against the local templates).
+# Without an alias, `@NAME` references are skipped.
 #
 # Paths can be files or directories (searched for *.yml and *.yaml).
 # With no paths, every YAML file in the repo is checked except tests/cases/bad.
@@ -367,8 +372,9 @@ module CheckTemplates
   class Checker
     attr_reader :violations
 
-    def initialize(manifest)
+    def initialize(manifest, aliases = {})
       @manifest = manifest
+      @aliases = aliases
       @violations = []
       @decl_cache = {}
     end
@@ -422,9 +428,13 @@ module CheckTemplates
         add(path, line, 'no-parent-template-path', "template path '#{tpath}' uses ../; reference templates from the repo root or a repository resource")
       end
       check_tfci_params(path, ref) if File.basename(tpath.sub(/@.*\z/, '')) == 'tfci.yml'
-      return if tpath.include?('@') # repository resource reference
+      target = if tpath.include?('@') # repository resource reference
+                 local, repo = tpath.split('@', 2)
+                 root = @aliases[repo]
+                 return if root.nil? # not resolvable here: another repository
 
-      target = if tpath.start_with?('/')
+                 File.join(root, local.sub(%r{\A/+}, ''))
+               elsif tpath.start_with?('/')
                  File.join(REPO_ROOT, tpath)
                else
                  File.expand_path(tpath, File.dirname(File.expand_path(path)))
@@ -791,13 +801,22 @@ module CheckTemplates
 
   def self.main(argv)
     manifest_path = DEFAULT_MANIFEST
+    aliases = {}
     OptionParser.new do |o|
-      o.banner = 'Usage: check_templates.rb [--manifest FILE] [paths...]'
+      o.banner = 'Usage: check_templates.rb [--manifest FILE] [--alias NAME=DIR]... [paths...]'
       o.on('--manifest FILE', 'tfci command manifest') { |v| manifest_path = v }
+      o.on('--alias NAME=DIR', 'resolve template@NAME to DIR/template') do |v|
+        name, dir = v.split('=', 2)
+        if name.to_s.empty? || dir.to_s.empty?
+          warn "check_templates: --alias needs NAME=DIR, got '#{v}'"
+          exit 2
+        end
+        aliases[name] = File.expand_path(dir)
+      end
     end.parse!(argv)
 
     files = argv.empty? ? default_paths : yaml_files(argv)
-    checker = Checker.new(Manifest.new(manifest_path))
+    checker = Checker.new(Manifest.new(manifest_path), aliases)
     files.each { |f| checker.check_file(relative(f)) }
     vs = checker.violations.uniq { |v| [v.file, v.line, v.rule, v.message] }
     vs.sort_by { |v| [v.file, v.line.to_i, v.rule] }.each do |v|

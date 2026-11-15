@@ -1,0 +1,236 @@
+# Extends template for the main branch: plan, approval, apply.
+#
+#   Stage Plan, job plan: checkout, validate (optional, off by default because
+#     the PR already validated), upload, run-create (a real run, not plan
+#     only), plan-output, then a gate step that logs what happens next.
+#   Stage Apply, deployment job apply on `environment`: waits for the
+#     environment's checks (approval), then applies the run from the Plan
+#     stage by its ID. It applies that run only, never a newer one.
+#
+# BEFORE USE:
+#   1. Turn Auto apply OFF on the workspace. With it on, TFE applies the run
+#      as soon as the plan finishes, before anyone approves in Azure DevOps.
+#      The Plan stage fails when it sees the run already applying or applied.
+#   2. On the Azure DevOps environment `environment`, add an Approvals check
+#      and a Branch control check that allows only refs/heads/main.
+#   3. On the variable group `applyVariableGroup` (default tfc-apply), which
+#      holds the apply token, add the same Branch control check (refs/heads/main)
+#      and an approval, and grant pipeline permission only to this pipeline.
+#   The Plan stage uses `planVariableGroup` (default tfc-plan), a token with
+#   plan permission only.
+#
+# When does Apply run? Stage condition (Review Focus 1 and 2):
+#   and(succeeded(),
+#       in(dependencies.Plan.outputs['plan.run.RUN_STATUS'],
+#          'planned', 'cost_estimated', 'policy_checked', 'policy_override'))
+#   - cost estimation or policy checks end the plan in cost_estimated or
+#     policy_checked, not planned; those still go to the approval and apply.
+#   - planned_and_finished (no changes): Apply is skipped. The Plan stage logs
+#     "No changes: nothing to apply" and succeeds, so the run succeeds.
+#   - any other status (for example applied, or policy_soft_failed) fails the
+#     Plan stage in the gate step, so nothing is skipped silently.
+# Syntax: "Expressions", section "Dependencies", stage to stage example
+#   condition: and(succeeded(), eq(dependencies.A.outputs['A1.printvar.shouldrun'], 'true'))
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/expressions?view=azure-devops#dependencies
+# in(): "Evaluates True if left parameter is equal to any right parameter",
+#   ordinal ignore-case for strings.
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/expressions?view=azure-devops#in
+#
+# The run ID reaches the deployment job through a job-level variable:
+#   RUN_ID: $[ stageDependencies.Plan.plan.outputs['run.RUN_ID'] ]
+# "Set variables in scripts", section "Set an output variable for use in
+# future stages":
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/set-variables-scripts?view=azure-devops#set-an-output-variable-for-use-in-future-stages
+# The docs show this form in a regular job's variables and in a deployment
+# job's stage-level variables; a deployment job's job-level variables is
+# unverified until the first server-side compile.
+#
+# Deployment jobs do not check out source, and download pipeline artifacts in
+# the deploy hook unless `- download: none` is set. run-apply needs no code, so
+# it runs in $(Agent.TempDirectory).
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/deployment-jobs?view=azure-devops
+#
+# Step templates are referenced with a leading / (repository root). Assumption,
+# to confirm in the first server-side compile: inside a template loaded with
+# @alias, a / path resolves in that template's repository.
+parameters:
+  - name: workspace
+    type: string
+  - name: organization
+    type: string
+  - name: hostname
+    type: string
+    default: app.terraform.io
+  # Terraform configuration directory, relative to the repository root.
+  - name: directory
+    type: string
+    default: ./
+  # Agent pool for both jobs, e.g. {name: tfe-agents}.
+  - name: pool
+    type: object
+  - name: mode
+    type: string
+    default: docker
+    values:
+      - docker
+      - native
+  - name: image
+    type: string
+    default: hashicorp/tfci:v1.4.0
+  # Absolute path on the agent to a PEM file with the private CA for TFE.
+  - name: caBundle
+    type: string
+    default: ''
+  - name: planVariableGroup
+    type: string
+    default: tfc-plan
+  - name: applyVariableGroup
+    type: string
+    default: tfc-apply
+  # Both groups hold the token under this variable name.
+  - name: tokenVariable
+    type: string
+    default: TF_API_TOKEN
+  # Azure DevOps environment with an approval and a branch control check.
+  - name: environment
+    type: string
+  - name: enableValidate
+    type: boolean
+    default: false
+  - name: enableTflint
+    type: boolean
+    default: true
+  # Validate step images and settings (see templates/steps/validate.yml).
+  - name: terraformImage
+    type: string
+    default: hashicorp/terraform:1.17.0
+  - name: tflintImage
+    type: string
+    default: ghcr.io/terraform-linters/tflint:v0.66.0
+  - name: cliConfigFile
+    type: string
+    default: ''
+  - name: validateCaBundle
+    type: string
+    default: ''
+
+stages:
+  - stage: Plan
+    displayName: Plan
+    jobs:
+      - job: plan
+        displayName: Plan (${{ parameters.workspace }})
+        pool: ${{ parameters.pool }}
+        variables:
+          - group: ${{ parameters.planVariableGroup }}
+        steps:
+          - checkout: self
+
+          - ${{ if eq(parameters.enableValidate, true) }}:
+              - template: /templates/steps/validate.yml
+                parameters:
+                  directory: $(System.DefaultWorkingDirectory)/${{ parameters.directory }}
+                  mode: ${{ parameters.mode }}
+                  terraformImage: ${{ parameters.terraformImage }}
+                  tflintImage: ${{ parameters.tflintImage }}
+                  enableTflint: ${{ parameters.enableTflint }}
+                  caBundle: ${{ parameters.validateCaBundle }}
+                  cliConfigFile: ${{ parameters.cliConfigFile }}
+
+          - template: /templates/steps/upload.yml
+            parameters:
+              workspace: ${{ parameters.workspace }}
+              directory: ${{ parameters.directory }}
+              speculative: false
+              mode: ${{ parameters.mode }}
+              image: ${{ parameters.image }}
+              hostname: ${{ parameters.hostname }}
+              organization: ${{ parameters.organization }}
+              caBundle: ${{ parameters.caBundle }}
+              tokenVariable: ${{ parameters.tokenVariable }}
+
+          - template: /templates/steps/run-create.yml
+            parameters:
+              workspace: ${{ parameters.workspace }}
+              configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
+              planOnly: false
+              mode: ${{ parameters.mode }}
+              image: ${{ parameters.image }}
+              hostname: ${{ parameters.hostname }}
+              organization: ${{ parameters.organization }}
+              caBundle: ${{ parameters.caBundle }}
+              tokenVariable: ${{ parameters.tokenVariable }}
+
+          - template: /templates/steps/plan-output.yml
+            parameters:
+              planId: $(run.PLAN_ID)
+              workspace: ${{ parameters.workspace }}
+              runLink: $(run.RUN_LINK)
+              runStatus: $(run.RUN_STATUS)
+              configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
+              mode: ${{ parameters.mode }}
+              image: ${{ parameters.image }}
+              hostname: ${{ parameters.hostname }}
+              organization: ${{ parameters.organization }}
+              caBundle: ${{ parameters.caBundle }}
+              tokenVariable: ${{ parameters.tokenVariable }}
+
+          # Says what the Apply stage will do. Keep the status list in step
+          # with the Apply stage condition below.
+          - bash: |
+              set -euo pipefail
+              echo "Workspace Auto apply must be off, or TFE applies before the Azure DevOps approval."
+              echo "Run $RUN_ID: $RUN_STATUS ($RUN_LINK)"
+              case "$RUN_STATUS" in
+                planned|cost_estimated|policy_checked|policy_override)
+                  echo "Changes to apply: the Apply stage waits for the environment approval."
+                  ;;
+                planned_and_finished)
+                  echo "No changes: nothing to apply. The Apply stage is skipped."
+                  ;;
+                applying|apply_queued|applied|confirmed)
+                  echo "##vso[task.logissue type=error]Run $RUN_ID is already $RUN_STATUS without an approval: turn Auto apply off on the workspace."
+                  exit 1
+                  ;;
+                *)
+                  echo "##vso[task.logissue type=error]Run $RUN_ID ended the plan in '$RUN_STATUS', which this pipeline cannot apply. See the run in TFE."
+                  exit 1
+                  ;;
+              esac
+            name: gate
+            displayName: Decide whether to apply
+            env:
+              RUN_ID: $(run.RUN_ID)
+              RUN_STATUS: $(run.RUN_STATUS)
+              RUN_LINK: $(run.RUN_LINK)
+
+  - stage: Apply
+    displayName: Apply
+    dependsOn: Plan
+    condition: and(succeeded(), in(dependencies.Plan.outputs['plan.run.RUN_STATUS'], 'planned', 'cost_estimated', 'policy_checked', 'policy_override'))
+    jobs:
+      - deployment: apply
+        displayName: Apply (${{ parameters.workspace }})
+        pool: ${{ parameters.pool }}
+        environment: ${{ parameters.environment }}
+        # Job level, not stage level (stage level is unverified for this).
+        variables:
+          - group: ${{ parameters.applyVariableGroup }}
+          - name: RUN_ID
+            value: $[ stageDependencies.Plan.plan.outputs['run.RUN_ID'] ]
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # No artifacts to download; deployment jobs do not check out.
+                - download: none
+                - template: /templates/steps/run-apply.yml
+                  parameters:
+                    runId: $(RUN_ID)
+                    workingDirectory: $(Agent.TempDirectory)
+                    mode: ${{ parameters.mode }}
+                    image: ${{ parameters.image }}
+                    hostname: ${{ parameters.hostname }}
+                    organization: ${{ parameters.organization }}
+                    caBundle: ${{ parameters.caBundle }}
+                    tokenVariable: ${{ parameters.tokenVariable }}

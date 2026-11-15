@@ -1,0 +1,155 @@
+# Extends template for pull request validation builds: a speculative
+# (plan-only) run on this PR's own code, posted back to the PR.
+#
+# One stage, one job:
+#   checkout, validate (optional), upload (speculative), run-create (plan
+#   only, on that configuration version), plan-output, pr-comment.
+#
+# The run is pinned to the configuration version this build uploaded
+# ($(upload.CONFIGURATION_VERSION_ID)), so two PRs at once each see their own
+# plan (Review Focus 3).
+#
+# A failed plan still reports: the run-create output step and pr-comment run on
+# succeededOrFailed(), so the PR gets the comment and a failed status, then the
+# job fails. plan-output has no condition parameter, so it only runs when the
+# plan succeeded; after a failed plan pr-comment posts the run status and link
+# without the counts.
+#
+# Azure Repos runs this for a PR through branch policy build validation, not
+# through a YAML `pr:` trigger. See examples/azure-pipelines.pr.yml.
+#
+# Secrets: the job uses the variable group `variableGroup` (default tfc-plan).
+# It must hold the variable named by `tokenVariable` (default TF_API_TOKEN), a
+# TFE team token with plan permission only. The build service identity needs
+# "Contribute to pull requests" on the repository for the PR comment.
+#
+# Step templates are referenced with a leading / (repository root). Assumption,
+# to confirm in the first server-side compile: inside a template loaded with
+# @alias, a / path resolves in that template's repository.
+parameters:
+  - name: workspace
+    type: string
+  - name: organization
+    type: string
+  - name: hostname
+    type: string
+    default: app.terraform.io
+  # Terraform configuration directory, relative to the repository root.
+  - name: directory
+    type: string
+    default: ./
+  # Agent pool for the job, e.g. {name: tfe-agents} or {vmImage: ubuntu-24.04}.
+  - name: pool
+    type: object
+  - name: mode
+    type: string
+    default: docker
+    values:
+      - docker
+      - native
+  - name: image
+    type: string
+    default: hashicorp/tfci:v1.4.0
+  # Absolute path on the agent to a PEM file with the private CA for TFE.
+  - name: caBundle
+    type: string
+    default: ''
+  - name: variableGroup
+    type: string
+    default: tfc-plan
+  - name: tokenVariable
+    type: string
+    default: TF_API_TOKEN
+  - name: enableValidate
+    type: boolean
+    default: true
+  - name: enableTflint
+    type: boolean
+    default: true
+  # Validate step images and settings (see templates/steps/validate.yml).
+  - name: terraformImage
+    type: string
+    default: hashicorp/terraform:1.17.0
+  - name: tflintImage
+    type: string
+    default: ghcr.io/terraform-linters/tflint:v0.66.0
+  # CLI config with a provider mirror, for `terraform init` without internet.
+  - name: cliConfigFile
+    type: string
+    default: ''
+  # CA bundle for `terraform init` against a private mirror. It replaces the
+  # system roots there, unlike caBundle for tfci, so it is a separate value.
+  - name: validateCaBundle
+    type: string
+    default: ''
+
+stages:
+  - stage: Plan
+    displayName: Speculative plan
+    jobs:
+      - job: plan
+        displayName: Speculative plan (${{ parameters.workspace }})
+        pool: ${{ parameters.pool }}
+        variables:
+          - group: ${{ parameters.variableGroup }}
+        steps:
+          - checkout: self
+
+          - ${{ if eq(parameters.enableValidate, true) }}:
+              - template: /templates/steps/validate.yml
+                parameters:
+                  directory: $(System.DefaultWorkingDirectory)/${{ parameters.directory }}
+                  mode: ${{ parameters.mode }}
+                  terraformImage: ${{ parameters.terraformImage }}
+                  tflintImage: ${{ parameters.tflintImage }}
+                  enableTflint: ${{ parameters.enableTflint }}
+                  caBundle: ${{ parameters.validateCaBundle }}
+                  cliConfigFile: ${{ parameters.cliConfigFile }}
+
+          - template: /templates/steps/upload.yml
+            parameters:
+              workspace: ${{ parameters.workspace }}
+              directory: ${{ parameters.directory }}
+              speculative: true
+              mode: ${{ parameters.mode }}
+              image: ${{ parameters.image }}
+              hostname: ${{ parameters.hostname }}
+              organization: ${{ parameters.organization }}
+              caBundle: ${{ parameters.caBundle }}
+              tokenVariable: ${{ parameters.tokenVariable }}
+
+          - template: /templates/steps/run-create.yml
+            parameters:
+              workspace: ${{ parameters.workspace }}
+              configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
+              planOnly: true
+              mode: ${{ parameters.mode }}
+              image: ${{ parameters.image }}
+              hostname: ${{ parameters.hostname }}
+              organization: ${{ parameters.organization }}
+              caBundle: ${{ parameters.caBundle }}
+              tokenVariable: ${{ parameters.tokenVariable }}
+
+          - template: /templates/steps/plan-output.yml
+            parameters:
+              planId: $(run.PLAN_ID)
+              workspace: ${{ parameters.workspace }}
+              runLink: $(run.RUN_LINK)
+              runStatus: $(run.RUN_STATUS)
+              configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
+              mode: ${{ parameters.mode }}
+              image: ${{ parameters.image }}
+              hostname: ${{ parameters.hostname }}
+              organization: ${{ parameters.organization }}
+              caBundle: ${{ parameters.caBundle }}
+              tokenVariable: ${{ parameters.tokenVariable }}
+
+          # Default condition succeededOrFailed(): posts after a failed plan too.
+          - template: /templates/steps/pr-comment.yml
+            parameters:
+              workspace: ${{ parameters.workspace }}
+              runLink: $(run.RUN_LINK)
+              runStatus: $(run.RUN_STATUS)
+              add: $(plan_output.ADD)
+              change: $(plan_output.CHANGE)
+              destroy: $(plan_output.DESTROY)

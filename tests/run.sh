@@ -21,10 +21,9 @@ run_check() { # name command...
   if "$@"; then record "$name" PASS; else record "$name" FAIL; fi
 }
 
-# Directories of v2 templates to check. TODO(Task 5): add examples once they
-# are rewritten for v2; the v1 examples still fail by design.
+# Directories of v2 templates and example pipelines to check.
 TEMPLATE_DIRS=()
-for d in templates; do
+for d in templates examples; do
   if [[ -d "$d" ]]; then
     TEMPLATE_DIRS+=("$d")
   else
@@ -35,10 +34,11 @@ done
 # 0. The checker's own tests.
 run_check "checker self-tests" bash tests/test_checker.sh
 run_check "pr-comment fake API test" bash tests/pr_comment_test.sh
+run_check "examples vs templates (--alias tfc=.)" bash tests/alias_test.sh
 
 # 1. Static template checks.
 if [[ ${#TEMPLATE_DIRS[@]} -gt 0 ]]; then
-  run_check "check_templates" ruby tests/check_templates.rb "${TEMPLATE_DIRS[@]}"
+  run_check "check_templates" ruby tests/check_templates.rb --alias tfc=. "${TEMPLATE_DIRS[@]}"
 else
   record "check_templates (no template dirs)" SKIP
 fi

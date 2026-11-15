@@ -1,0 +1,25 @@
+# Main pipeline that pins this repo as a repository resource and misspells a
+# parameter of apply-run.yml (enviroment). Only caught with --alias tfc=.,
+# which tests/alias_test.sh passes. Kept out of tests/cases/bad/*.yml because
+# test_checker.sh runs those without an alias.
+trigger:
+  branches:
+    include:
+      - main
+pr: none
+
+resources:
+  repositories:
+    - repository: tfc
+      type: git
+      name: platform/tfc-workflow-azdo
+      ref: refs/tags/v2.0.0
+
+extends:
+  template: templates/pipelines/apply-run.yml@tfc
+  parameters:
+    workspace: my-app-dev
+    organization: my-org
+    pool:
+      name: tfe-agents
+    enviroment: my-app-dev
