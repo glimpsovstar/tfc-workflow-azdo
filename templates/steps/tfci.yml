@@ -34,8 +34,23 @@
 # code; a short summary of the JSON is printed either way.
 #
 # Modes:
-#   docker  docker run the pinned image (agents with Docker).
+#   docker  docker run the pinned image (agents with Docker). Only the
+#           variables named with -e reach the container.
 #   native  tfci from the agent's PATH (agents without Docker, e.g. pods).
+#           tfci runs with every other variable unset, keeping an allowlist: PATH, HOME, the TF_*
+#           variables this step sets, SSL_CERT_DIR and SSL_CERT_FILE, and the
+#           proxy variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY, either case)
+#           when the agent sets them. tfci reads every TF_VAR_* variable in its
+#           environment as a run variable (var_file.go, v1.4.0), so an agent or
+#           pipeline TF_VAR_* never leaks into a run.
+#
+# hostname: required, no default, so a token is never sent to a host the
+# caller did not name.
+#
+# logLevel: '' (default, tfci logs off), ERROR, WARN, INFO or DEBUG. When set it
+# becomes TF_LOG for tfci (passed as -e TF_LOG in docker mode). DEBUG: keep it
+# out of shared logs as a precaution. Levels match tfci's ValidLevels
+# (internal/logging/logging.go, v1.4.0).
 parameters:
   - name: name
     type: string
@@ -60,7 +75,6 @@ parameters:
     default: hashicorp/tfci:v1.4.0
   - name: hostname
     type: string
-    default: app.terraform.io
   - name: organization
     type: string
   - name: caBundle
@@ -76,6 +90,9 @@ parameters:
     type: string
     default: 1h
   - name: outputFile
+    type: string
+    default: ''
+  - name: logLevel
     type: string
     default: ''
 
@@ -117,6 +134,19 @@ steps:
         echo "##vso[task.logissue type=error]tfci.yml: workingDirectory '$TFCI_WORKDIR' does not exist"
         exit 1
       fi
+      case "$TFCI_LOG_LEVEL" in
+        '' | ERROR | WARN | INFO | DEBUG) ;;
+        *)
+          echo "##vso[task.logissue type=error]tfci.yml: logLevel '$TFCI_LOG_LEVEL' must be empty, ERROR, WARN, INFO or DEBUG"
+          exit 1
+          ;;
+      esac
+      # An agent-wide TF_LOG must not switch tfci logging on by itself.
+      if [[ -n "$TFCI_LOG_LEVEL" ]]; then
+        export TF_LOG="$TFCI_LOG_LEVEL"
+      else
+        unset TF_LOG
+      fi
       if [[ -n "$TFCI_CA_BUNDLE" ]]; then
         if [[ "$TFCI_CA_BUNDLE" != /* || ! -f "$TFCI_CA_BUNDLE" ]]; then
           echo "##vso[task.logissue type=error]tfci.yml: caBundle '$TFCI_CA_BUNDLE' must be an absolute path to an existing file"
@@ -129,6 +159,9 @@ steps:
       case "$TFCI_MODE" in
         docker)
           run=(run --rm -e TF_API_TOKEN -e TF_HOSTNAME -e TF_CLOUD_ORGANIZATION -e TF_MAX_TIMEOUT)
+          if [[ -n "$TFCI_LOG_LEVEL" ]]; then
+            run+=(-e TF_LOG)
+          fi
           if [[ -n "$TFCI_CA_BUNDLE" ]]; then
             run+=(-v "$TFCI_CA_BUNDLE:/tfci/ca/tfe-ca.pem:ro" -e SSL_CERT_DIR=/tfci/ca)
           fi
@@ -143,8 +176,23 @@ steps:
             cp "$TFCI_CA_BUNDLE" "$ca_dir/tfe-ca.pem"
             export SSL_CERT_DIR="$ca_dir"
           fi
+          # Allowlist: tfci reads every TF_VAR_* as a run variable, so it gets
+          # a clean environment with only what it needs.
+          keep=(PATH HOME TF_API_TOKEN TF_HOSTNAME TF_CLOUD_ORGANIZATION TF_MAX_TIMEOUT TF_LOG
+            SSL_CERT_DIR SSL_CERT_FILE HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy)
           cd "$TFCI_WORKDIR"
-          tfci "${cmd[@]}" --json ${extra[@]+"${extra[@]}"} ${text[@]+"${text[@]}"} >"$out" || rc=$?
+          # Unset everything else inside a subshell, then exec tfci. Nothing
+          # secret goes on any command line (passing NAME=value to env would put the
+          # token in argv, readable through /proc on a shared agent).
+          (
+            while IFS= read -r n; do
+              case " ${keep[*]} " in
+                *" $n "*) ;;
+                *) unset "$n" 2>/dev/null || true ;;
+              esac
+            done < <(compgen -e)
+            exec tfci "${cmd[@]}" --json ${extra[@]+"${extra[@]}"} ${text[@]+"${text[@]}"}
+          ) >"$out" || rc=$?
           ;;
         *)
           echo "##vso[task.logissue type=error]tfci.yml: unknown mode '$TFCI_MODE' (docker or native)"
@@ -184,5 +232,6 @@ steps:
       TFCI_TOKEN_VARIABLE: ${{ parameters.tokenVariable }}
       TFCI_STEP_NAME: ${{ parameters.name }}
       TFCI_TEMP_DIR: $(Agent.TempDirectory)
+      TFCI_LOG_LEVEL: ${{ parameters.logLevel }}
       ${{ each arg in parameters.textArgs }}:
-        TFCI_TEXT_${{ arg.key }}: ${{ arg.value }}
+        ${{ format('TFCI_TEXT_{0}', arg.key) }}: ${{ arg.value }}

@@ -27,7 +27,7 @@ Every arrow starts at the agent. TFE needs no inbound rule from outside the netw
 
 ## Hostname
 
-Set `hostname` on the pipeline template to the TFE hostname, for example `tfe.example.internal`. It reaches tfci as `TF_HOSTNAME` ([`tfci.yml`](../templates/steps/tfci.yml)). The default `app.terraform.io` is HCP Terraform.
+Set `hostname` on the pipeline template to the TFE hostname, for example `tfe.example.internal`. It reaches tfci as `TF_HOSTNAME` ([`tfci.yml`](../templates/steps/tfci.yml)). `hostname` is required and has no default, so the token only goes to a host you named. For HCP Terraform set `app.terraform.io`.
 
 ## Private CA
 

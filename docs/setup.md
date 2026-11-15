@@ -39,14 +39,19 @@ Protect `tfc-apply`:
 
 `tfc-plan` needs pipeline permission for the PR pipeline, the main pipeline and the smoke test.
 
+Add a Required template check to both groups too: see [step 10](#10-required-template-checks).
+
 ## 3. Environment
 
 In Pipelines, Environments, create the environment named in the `environment` parameter of `apply-run.yml` (the example uses `my-app-dev`). Under Approvals and checks add:
 
 - **Approvals:** the people who approve applies.
 - **Branch control:** Allowed branches `refs/heads/main`.
+- **Exclusive lock:** recommended. The Apply stage sets `lockBehavior: sequential`, so with this check runs take the environment one at a time, in order. Without `lockBehavior` the default is `runLatest`, which cancels older runs. Microsoft: [Exclusive lock](https://learn.microsoft.com/azure/devops/pipelines/process/approvals?view=azure-devops#exclusive-lock) ("This can be specified for the whole pipeline or for a given stage").
 
 The Apply stage is a deployment job on this environment, so it waits for these checks before it touches the apply token's variable group.
+
+The Plan stage creates a saved-plan run (`savePlan`, default `true`). If the approval is rejected or expires, the saved plan stays in TFE but does not lock the workspace. Re-run the pipeline to apply later, so the apply uses a fresh plan. See [troubleshooting.md](troubleshooting.md#approval-rejected-or-expired).
 
 ## 4. Branch policy build validation
 
@@ -84,7 +89,13 @@ Set the `mode` parameter to match the agent:
 | `docker` (default) | Docker, bash, jq, curl 7.76 or later | VM or scale-set agents |
 | `native` | `tfci` on the PATH, bash, jq, curl 7.76 or later; `terraform` and `tflint` on the PATH when validation is on | Agents without Docker, such as pods |
 
-curl 7.76 is the first release with `--fail-with-body`, which `pr-comment.yml` uses. In docker mode the agent pulls `hashicorp/tfci`, `hashicorp/terraform` and the tflint image; see [internal-registry.md](internal-registry.md) to serve them from your own registry.
+curl 7.76 is the first release with `--fail-with-body`, which `pr-comment.yml` uses.
+
+In native mode tfci runs with every other variable unset, keeping an allowlist (token, hostname, organization, timeout, `TF_LOG`, CA and proxy variables, `PATH`, `HOME`), because tfci reads every `TF_VAR_*` as a run variable. Agent-wide `TF_VAR_*` variables never reach a run. See [troubleshooting.md](troubleshooting.md#a-tf_var_-variable-has-no-effect-on-the-run).
+
+Every job sets `timeoutInMinutes` from `jobTimeoutInMinutes` (default `90`). It must exceed `maxTimeout` (default `1h`), or Azure DevOps cancels the job while tfci still waits for the run.
+
+`logLevel` (default `''`) sets tfci's `TF_LOG`: `ERROR`, `WARN`, `INFO` or `DEBUG`. Keep DEBUG out of shared logs as a precaution. In docker mode the agent pulls `hashicorp/tfci`, `hashicorp/terraform` and the tflint image; see [internal-registry.md](internal-registry.md) to serve them from your own registry.
 
 The agent must reach TFE on 443 and Azure DevOps outbound. For a private TFE see [tfe-private-network.md](tfe-private-network.md). Pass the TFE CA bundle path as `caBundle` when TFE uses a private CA.
 
@@ -108,3 +119,21 @@ Project settings, Pipelines, Settings:
 - **Protect access to repositories in YAML pipelines:** on. A pipeline must be granted access to each repository it uses, including this template repository, the first time it runs. Approve it once per pipeline.
 
 Assumption: the template repository is in the same project as the consumer, or the consumer's build service has read access to it. Cross-project repository resources need that access.
+
+## 10. Required template checks
+
+A PR build runs the PR branch's copy of the consumer pipeline YAML. Without a check, a PR author can rewrite that file so it no longer `extends` these templates, load `tfc-plan` and use the plan token directly. A Required template check makes Azure DevOps refuse the stage unless the pipeline extends the template you name.
+
+Add it under Approvals and checks, Required template, on:
+
+| Resource | Required template |
+| --- | --- |
+| Variable group `tfc-plan` | `templates/pipelines/speculative-run.yml` and `templates/pipelines/apply-run.yml` (the plan token serves both) |
+| Variable group `tfc-apply` | `templates/pipelines/apply-run.yml` |
+| The PR agent pool | `templates/pipelines/speculative-run.yml` |
+
+For each: Repository type Azure Repos, Repository `<Project>/tfc-workflow-azdo`, Ref the pinned tag, for example `refs/tags/v2.0.0`. Update the Ref when you move consumers to a new tag.
+
+Microsoft: [Templates for security, Required templates](https://learn.microsoft.com/azure/devops/pipelines/security/templates?view=azure-devops#required-templates) and [Approvals and checks, Required template](https://learn.microsoft.com/azure/devops/pipelines/process/approvals?view=azure-devops#required-template). "This check applies only when the pipeline extends from a template."
+
+The smoke test does not extend a pipeline template, so with this check on `tfc-plan` it cannot load the group. Run it with its own variable group and a plan token, or before you add the check.

@@ -44,17 +44,47 @@ If `terraform init` in the validate job fails with the same x509 error, the prov
 
 **Cause.** tfci waits until the run reaches a terminal state, bounded by `TF_MAX_TIMEOUT` (the `maxTimeout` parameter, default `1h`). Common reasons a run does not finish: it is queued behind another run on the same workspace, no TFE agent is free (agent execution mode), the run is waiting for a policy override, or TFE capacity is full.
 
-**Fix.** Open the run link in TFE and see what it waits for. Clear the queue, start an agent, or override the policy. The step templates take `maxTimeout`; the pipeline templates do not pass it, so they use the `1h` default.
+**Fix.** Open the run link in TFE and see what it waits for. Clear the queue, start an agent, or override the policy. If runs really take longer, raise `maxTimeout` on the pipeline template (both pipeline templates pass it to every tfci step) and keep `jobTimeoutInMinutes` above it.
+
+## The job is canceled after 90 minutes
+
+**Symptom.** A job ends as canceled, not failed, with a message that it exceeded the maximum execution time.
+
+**Cause.** Every job in the pipeline templates sets `timeoutInMinutes` from `jobTimeoutInMinutes` (default `90`). The job hit that limit before tfci finished waiting, usually because `maxTimeout` was raised above it.
+
+**Fix.** Keep `jobTimeoutInMinutes` above `maxTimeout`, with room for the upload and the other steps. With `maxTimeout: 2h`, set `jobTimeoutInMinutes: 150` or more.
 
 ## The Apply stage is skipped
 
 **Symptom.** The main pipeline succeeds, the Apply stage shows as skipped, and nothing is applied.
 
-**Cause.** The Apply stage runs only when the Plan stage succeeded and the run status is `planned`, `cost_estimated`, `policy_checked` or `policy_override`. The common case is `planned_and_finished`: the plan has no changes. The gate step then logs `No changes: nothing to apply. The Apply stage is skipped.`
+**Cause.** The Apply stage runs only when the Plan stage succeeded and the run status is in the APPLYABLE_MAIN set: `planned`, `planned_and_saved`, `cost_estimated`, `policy_checked`, `post_plan_completed` or `policy_override`. The canonical sets are in `tests/status_sets_test.rb`, which fails if the gate or the stage condition drift from them. The common skip is `planned_and_finished`: the plan has no changes. The gate step then logs `No changes: nothing to apply. The Apply stage is skipped.`
 
 Any other status fails the Plan stage in the gate step (`Decide whether to apply`), so it does not skip silently: `Run <id> ended the plan in '<status>', which this pipeline cannot apply.`
 
-**Fix.** For no changes, nothing to fix. For a failed gate, open the run in TFE. A status such as `policy_soft_failed` needs an override in TFE before the run can be applied; then re-run the pipeline.
+**Fix.** For no changes, nothing to fix. For a failed gate, open the run in TFE.
+
+`policy_soft_failed` is a plan-only final state: a speculative (PR) run ends there when a soft-mandatory policy fails, and the PR status says `soft-mandatory policy failed: override in TFE`. A main-branch run that fails a soft-mandatory policy waits in `policy_override` instead (tfci treats `policy_override` as a finished state that needs human approval, `internal/cloud/run.go` in v1.4.0); see the next entry.
+
+## A policy needs an override
+
+**Symptom.** The gate step logs the warning `A policy needs an override in TFE before you approve this apply`, with the run link. If the apply is approved anyway, Apply run fails with `Run <id> is policy_override and cannot be applied yet. If a policy needs an override, override it in TFE (or discard the run), then re-run the pipeline.`
+
+**Cause.** A soft-mandatory policy failed on the main-branch run. TFE holds the run in `policy_override` until someone with permission overrides the policy. Until then the run is not confirmable and `tfci run apply` exits with `cannot be applied` (`run_apply.go`, tfci v1.4.0).
+
+**Fix.** Before approving, open the run link in TFE and override the policy, or discard the run if it should not be applied. After a failed apply, override the policy (or discard the run) and re-run the pipeline.
+
+## Approval rejected or expired
+
+**Symptom.** The environment approval was rejected or timed out. The Apply stage did not run.
+
+**Cause.** The main pipeline creates a saved-plan run (`savePlan`, default `true`). It ends the plan in `planned_and_saved` and does not lock the workspace or become its current run until it is applied. The rejected run stays in TFE as a saved plan.
+
+**Fix.** Nothing blocks the workspace: other runs can go ahead. To apply the change later, re-run the pipeline. Do not apply the old saved plan by hand: it was reviewed against the state at the time, so a re-run with a fresh plan is the safe path. Discard the stale run in TFE if you want a tidy run list.
+
+Assumption, to confirm in the end-to-end test: `tfci run apply` applies a `planned_and_saved` run. tfci applies only runs that TFE reports as confirmable. The [TFE runs API](https://developer.hashicorp.com/terraform/enterprise/api-docs/run) lists `planned_and_saved` as a state that can be confirmed for apply; neither tfci v1.4.0 nor go-tfe says so directly.
+
+Two merges close together: both plan at once (a saved plan does not lock the workspace) and `lockBehavior: sequential` applies them one after the other. The second saved plan was made against the state before the first apply. Terraform refuses to apply a stale saved plan (`Error: Saved plan is stale`, checked locally with Terraform 1.17.0 on 2026-11-15). Assumption, to confirm in the end-to-end test: TFE applies saved plans the same way, so the second Apply fails safely and you re-run that pipeline.
 
 ## Auto apply detected
 
@@ -80,6 +110,14 @@ Any other status fails the Plan stage in the gate step (`Decide whether to apply
 
 **Fix.** Keep the job authorisation scope stable ([setup.md](setup.md#9-project-settings)). Resolve or delete the old threads by hand. New builds then update the newest thread.
 
+## The PR comment and status were not updated
+
+**Symptom.** `Post plan to pull request` succeeds and logs `A newer push exists on this PR (<commit>, this build planned <commit>): skipping the PR comment and status.`
+
+**Cause.** By design. Before it writes, the step reads the PR ([Pull Requests, Get](https://learn.microsoft.com/rest/api/azure/devops/git/pull-requests/get-pull-request?view=azure-devops-rest-7.1)) and compares `lastMergeSourceCommit.commitId` with this build's `System.PullRequest.SourceCommitId`. When they differ, a newer push has its own build, and this older plan must not overwrite it.
+
+**Fix.** None. Wait for the build of the newest push. The comment and the status description name the short commit they were planned from.
+
 ## Template not found when consumed cross-repo
 
 **Symptom.** The pipeline does not start. Azure DevOps reports that the template file or the repository resource `tfc` cannot be found.
@@ -100,3 +138,17 @@ Any other status fails the Plan stage in the gate step (`Decide whether to apply
 **Cause.** `mode` is `docker` (the default), and the agent has no Docker, for example an agent that runs as a pod.
 
 **Fix.** Set `mode: native` and put `tfci` on the agent's PATH (plus `terraform` and `tflint` if validation is on). See [internal-registry.md](internal-registry.md#native-mode-tfci-in-the-agent-image). Or run on agents that have Docker.
+
+## A TF_VAR_* variable has no effect on the run
+
+**Symptom.** A `TF_VAR_*` variable set on the agent or in the pipeline does not reach the TFE run.
+
+**Cause.** By design. tfci reads every `TF_VAR_*` in its environment as a run variable (`var_file.go`, tfci v1.4.0). To keep agent and pipeline variables out of runs, docker mode passes only the variables it names with `-e`, and native mode runs tfci with every other variable unset, keeping an allowlist: `PATH`, `HOME`, `TF_API_TOKEN`, `TF_HOSTNAME`, `TF_CLOUD_ORGANIZATION`, `TF_MAX_TIMEOUT`, `TF_LOG`, `SSL_CERT_DIR`, `SSL_CERT_FILE` and the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, either case).
+
+**Fix.** Set Terraform variables on the workspace or a variable set in TFE.
+
+## tfci needs more detail to debug
+
+**Symptom.** A tfci step fails and the log does not say enough.
+
+**Fix.** Set `logLevel` on the pipeline template to `ERROR`, `WARN`, `INFO` or `DEBUG` (default `''`, logging off). It becomes `TF_LOG` for tfci. Keep DEBUG out of shared logs as a precaution. Set it back to `''` when done. Any other value fails the step before tfci runs.

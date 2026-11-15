@@ -3,10 +3,16 @@
 #
 # Extracts the step's bash script with tests/extract_scripts.rb and runs it
 # against a local fake Azure DevOps API (Ruby WEBrick on 127.0.0.1) that
-# records every request. Cases:
-#   a. no existing thread: one POST to threads, then a succeeded PR status
-#   b. a thread with our marker exists: PATCH that comment, no new thread
-#   c. runStatus errored: PR status failed
+# records every request. Run statuses are real plan-only end states of tfci
+# run create (getDesiredRunStatus, run.go, v1.4.0). Cases:
+#   a. planned_and_finished, no existing thread: one POST to threads, then a
+#      succeeded PR status; the comment and status name the short commit
+#   b. post_plan_completed, a thread with our marker exists: PATCH that
+#      comment, no new thread, succeeded status
+#   c. errored: PR status failed
+#   s. policy_soft_failed: PR status failed, "soft-mandatory policy failed"
+#   n. a newer push exists (lastMergeSourceCommit differs): no comment, no
+#      status, exit 0
 #   d. HTTP 403: non-zero exit, message names "Contribute to pull requests"
 #   e. the token never appears in stdout or stderr (checked in every case)
 # Also: the bad checker case for this step reports no-user-macro-in-script.
@@ -71,6 +77,11 @@ handler = lambda do |req, res|
     res.body = JSON.generate(message: 'TF401027: You need the Git permission PullRequestContribute')
     next res
   end
+  if req.request_method == 'GET' && raw_path.end_with?('/pullRequests/17')
+    head = File.read(File.join(dir, 'head')).strip
+    res.body = JSON.generate(pullRequestId: 17, lastMergeSourceCommit: { commitId: head })
+    next res
+  end
   if raw_path.end_with?('/_apis/connectionData')
     res.body = JSON.generate(authenticatedUser: { id: 'build-identity-id' })
     next res
@@ -107,6 +118,9 @@ server.start
 RUBY
 
 echo empty >"$work/mode"
+commit="0123456789abcdef0123456789abcdef01234567"
+newer="fedcba9876543210fedcba9876543210fedcba98"
+echo "$commit" >"$work/head"
 ruby "$work/server.rb" "$work" &
 server_pid=$!
 for _ in $(seq 1 50); do
@@ -119,10 +133,13 @@ token="tok-$RANDOM-not-a-real-secret-$RANDOM"
 summary="$work/plan-summary.md"
 printf '%s\n' '### Terraform plan: `ws-demo`' '' 'Plan: 1 to add, 0 to change, 0 to destroy. "quotes" and \backslash' >"$summary"
 
-# run_case NAME MODE RUN_STATUS [SUMMARY_FILE]: sets rc, out, err; leaves requests in $work/requests.jsonl.
+# run_case NAME MODE RUN_STATUS [SUMMARY_FILE] [PR_HEAD]: sets rc, out, err;
+# leaves requests in $work/requests.jsonl. PR_HEAD is the PR's newest source
+# commit in the fake API (default: this build's commit).
 run_case() {
-  local name="$1" mode="$2" run_status="$3" summary_file="${4:-$summary}"
+  local name="$1" mode="$2" run_status="$3" summary_file="${4:-$summary}" pr_head="${5:-$commit}"
   echo "$mode" >"$work/mode"
+  echo "$pr_head" >"$work/head"
   : >"$work/requests.jsonl"
   set +e
   env -i PATH="$PATH" HOME="$HOME" \
@@ -131,6 +148,7 @@ run_case() {
     PROJECT="My Project" \
     REPO_ID="0f2e0c4a-1111-2222-3333-444455556666" \
     PR_ID="17" \
+    SOURCE_COMMIT="$commit" \
     SUMMARY_FILE="$summary_file" \
     WORKSPACE="ws-demo" \
     RUN_LINK="https://tfe.example/app/org/workspaces/ws-demo/runs/run-abc" \
@@ -157,15 +175,15 @@ body_of() { jq -s -r --arg m "$1" --arg p "$2" '[.[] | select(.method == $m and 
 base_path="/org/My%20Project/_apis/git/repositories/0f2e0c4a-1111-2222-3333-444455556666/pullRequests/17"
 
 # (a) No thread yet.
-run_case "a" empty planned
+run_case "a" empty planned_and_finished
 if [[ $rc -eq 0 && "$(count GET /threads)" == 1 && "$(count POST /threads)" == 1 && "$(count PATCH /comments/1)" == 0 && "$(count POST /statuses)" == 1 ]]; then
   pass "a: one GET, one POST to threads, one POST to statuses (marker thread by someone else ignored)"
 else
   bad "a: rc=$rc requests: $(cat "$work/requests.jsonl") stdout: $out stderr: $err"
 fi
 methods="$(jq -s -r '[.[] | .method + " " + .path] | join(",")' "$work/requests.jsonl")"
-if [[ "$methods" == "GET /org/_apis/connectionData,GET $base_path/threads,POST $base_path/threads,POST $base_path/statuses" ]]; then
-  pass "a: request order and URL (project URL-encoded, plain http kept)"
+if [[ "$methods" == "GET $base_path,GET /org/_apis/connectionData,GET $base_path/threads,POST $base_path/threads,POST $base_path/statuses" ]]; then
+  pass "a: request order and URL: PR first, then identity, threads, status (project URL-encoded, plain http kept)"
 else
   bad "a: unexpected requests: $methods"
 fi
@@ -180,24 +198,24 @@ else
   bad "a: Authorization header missing or wrong"
 fi
 thread_body="$(body_of POST /threads)"
-expected_content="$(printf '<!-- tfc-workflow-azdo:ws-demo -->\n%s' "$(cat "$summary")")"
+expected_content="$(printf '<!-- tfc-workflow-azdo:ws-demo -->\n%s\n\nCommit: `01234567`' "$(cat "$summary")")"
 if jq -e --arg c "$expected_content" \
   '.status == 1 and (.comments | length == 1) and .comments[0].parentCommentId == 0 and .comments[0].commentType == 1 and .comments[0].content == $c' \
   <<<"$thread_body" >/dev/null; then
-  pass "a: thread body has marker plus summary, commentType 1, status 1"
+  pass "a: thread body has marker, summary and short commit, commentType 1, status 1"
 else
   bad "a: thread body: $thread_body"
 fi
 status_body="$(body_of POST /statuses)"
-if jq -e '.state == "succeeded" and .context.genre == "terraform" and .context.name == "tfe-plan" and .targetUrl == "https://tfe.example/app/org/workspaces/ws-demo/runs/run-abc" and .description == "Plan: +1 ~0 -0 (planned)"' \
+if jq -e '.state == "succeeded" and .context.genre == "terraform" and .context.name == "tfe-plan" and .targetUrl == "https://tfe.example/app/org/workspaces/ws-demo/runs/run-abc" and .description == "Plan: +1 ~0 -0 (planned_and_finished), commit 01234567"' \
   <<<"$status_body" >/dev/null; then
-  pass "a: status succeeded for planned, with context, targetUrl and description"
+  pass "a: status succeeded for planned_and_finished, with context, targetUrl and description with the short commit"
 else
   bad "a: status body: $status_body"
 fi
 
 # (b) Our thread exists: update it.
-run_case "b" existing cost_estimated
+run_case "b" existing post_plan_completed
 if [[ $rc -eq 0 && "$(count POST /threads)" == 0 && "$(count PATCH /threads/42/comments/3)" == 1 && "$(count POST /statuses)" == 1 ]]; then
   pass "b: PATCH threads/42/comments/3, no new thread"
 else
@@ -209,7 +227,7 @@ else
   bad "b: PATCH body: $(body_of PATCH /comments/3)"
 fi
 if [[ "$(jq -r .state <<<"$(body_of POST /statuses)")" == succeeded ]]; then
-  pass "b: status succeeded for cost_estimated"
+  pass "b: status succeeded for post_plan_completed"
 else
   bad "b: status body: $(body_of POST /statuses)"
 fi
@@ -220,6 +238,23 @@ if [[ $rc -eq 0 && "$(jq -r .state <<<"$(body_of POST /statuses)")" == failed ]]
   pass "c: status failed for errored"
 else
   bad "c: rc=$rc status body: $(body_of POST /statuses) stderr: $err"
+fi
+
+# (s) Soft-mandatory policy failed: failed status with the override hint.
+run_case "s" empty policy_soft_failed
+status_body="$(body_of POST /statuses)"
+if [[ $rc -eq 0 ]] && jq -e '.state == "failed" and .description == "soft-mandatory policy failed: override in TFE, commit 01234567"' <<<"$status_body" >/dev/null; then
+  pass "s: status failed for policy_soft_failed, description says override in TFE"
+else
+  bad "s: rc=$rc status body: $status_body stderr: $err"
+fi
+
+# (n) A newer push exists: skip the comment and the status.
+run_case "n" empty planned_and_finished "$summary" "$newer"
+if [[ $rc -eq 0 && "$(count GET /pullRequests/17)" == 1 && "$(count POST /threads)" == 0 && "$(count PATCH /comments/3)" == 0 && "$(count POST /statuses)" == 0 && "$out" == *"newer push"* ]]; then
+  pass "n: newer push: only the PR GET, no comment, no status, exit 0, logged"
+else
+  bad "n: rc=$rc requests: $(cat "$work/requests.jsonl") stdout: $out"
 fi
 
 # (c2) Missing summary file: fallback text with run link and status.

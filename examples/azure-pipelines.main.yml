@@ -2,8 +2,8 @@
 #
 # Before the first run:
 #   - Turn Auto apply off on the workspace, or TFE applies before the approval.
-#   - Create the environment below with an Approvals check and a Branch control
-#     check that allows only refs/heads/main.
+#   - Create the environment below with an Approvals check, a Branch control
+#     check that allows only refs/heads/main, and an Exclusive lock check.
 #   - Variable group tfc-plan holds TF_API_TOKEN with plan permission; variable
 #     group tfc-apply holds TF_API_TOKEN with apply permission and has the same
 #     Branch control check, an approval and pipeline permission for this
@@ -21,6 +21,7 @@ resources:
     - repository: tfc
       type: git
       name: <Project>/tfc-workflow-azdo
+      # The v2.0.0 tag is created at release. Until then this ref does not resolve.
       ref: refs/tags/v2.0.0
 
 extends:

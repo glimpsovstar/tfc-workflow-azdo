@@ -10,7 +10,7 @@ What these templates protect:
 
 Who they protect them from:
 
-- **PR authors.** A PR changes code that the pipeline runs: Terraform configuration, `.tflint.hcl`, and any value that reaches a script (branch name, PR title).
+- **PR authors.** A PR changes code that the pipeline runs: Terraform configuration, `.tflint.hcl`, and any value that reaches a script (branch name, PR title). A PR build also runs the PR branch's copy of the consumer pipeline YAML, so a PR author can rewrite it to stop extending these templates and use the plan token directly. The [Required template checks](#required-template-checks) close that.
 - **Anyone who can queue or edit a pipeline,** but should not reach production.
 - **Other jobs on a shared agent.**
 
@@ -25,6 +25,14 @@ There are two variable groups with two team tokens ([setup.md](setup.md#1-team-t
 
 PR code never runs in a job that holds the apply token. In `speculative-run.yml` the `validate` job, which runs PR code on the agent, has **no variable group at all**, so no token exists in that job. The `plan` job loads `tfc-plan` and only uploads files and calls the TFE API.
 
+## Required template checks
+
+Every protection in these templates assumes the pipeline actually extends them. The consumer YAML that a PR build runs comes from the PR branch, so a PR author controls it. Without a check, they can replace `extends` with their own job, load `tfc-plan` and send the plan token anywhere.
+
+Add a **Required template** check ([setup.md](setup.md#10-required-template-checks)) on `tfc-plan`, `tfc-apply` and the PR agent pool, requiring `templates/pipelines/speculative-run.yml@tfc` or `templates/pipelines/apply-run.yml@tfc` at the pinned ref. Azure DevOps then refuses any stage that uses those resources unless the pipeline extends the named template. Microsoft: [Templates for security, Required templates](https://learn.microsoft.com/azure/devops/pipelines/security/templates?view=azure-devops#required-templates).
+
+Pin the check's Ref to the tag. A check on a branch ref such as `refs/heads/main` of the template repository trusts whoever can push there; a tag is fixed until someone moves it.
+
 ## Secrets only through `env:`
 
 - The token reaches a script only through `env:` ([`tfci.yml`](../templates/steps/tfci.yml)): `TF_API_TOKEN: $(<tokenVariable>)`. No secret macro is expanded inside a script body. The checker rule `no-secret-macro-in-script` enforces this.
@@ -32,6 +40,12 @@ PR code never runs in a job that holds the apply token. In `speculative-run.yml`
 - tfci's JSON output is written to a file. The step prints only a fixed list of non-secret keys (`status`, `run_id`, `run_status`, and so on), never the whole document.
 - `pr-comment.yml` sends `System.AccessToken` to curl through a header read from a process substitution, not on curl's argv, and never prints it.
 - No script uses `set -x`. The checker rule `no-set-x` enforces this.
+- `logLevel` (tfci's `TF_LOG`) is off by default. Keep DEBUG out of shared logs as a precaution.
+- `hostname` is required, with no default, so the token only goes to a host the pipeline names.
+
+## No TF_VAR_* leaks into runs
+
+tfci reads every `TF_VAR_*` in its environment as a run variable (`var_file.go`, tfci v1.4.0). Docker mode passes only the variables named with `-e`. Native mode runs tfci with every other variable unset, keeping an allowlist: `PATH`, `HOME`, the `TF_*` variables the step sets, the CA variables and the proxy variables. `tests/steps_fake_tfci_test.sh` checks that `TF_VAR_FOO` does not reach a fake tfci.
 
 ## User-controlled values only through env
 
@@ -50,6 +64,8 @@ Values that come back from TFE are checked before they become pipeline variables
 3. A pasted marker from anyone else is ignored and the step creates its own thread.
 
 `tests/pr_comment_test.sh` covers a spoofed thread against a fake API.
+
+An older build cannot overwrite a newer plan either: before writing, the step compares the PR's `lastMergeSourceCommit.commitId` with this build's `System.PullRequest.SourceCommitId` and skips the comment and the status when a newer push exists. The comment and the status name the short commit they were planned from.
 
 ## Pinned images and lock file
 

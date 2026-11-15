@@ -94,8 +94,8 @@ spec:
               value: /etc/azp-ca/bundle.pem
             - name: NODE_EXTRA_CA_CERTS
               value: /etc/azp-ca/bundle.pem
-            - name: TF_HOSTNAME
-              value: tfe.lab.internal
+            # No TF_HOSTNAME here: the pipelines pass `hostname`, which is
+            # required, and tfci.yml sets TF_HOSTNAME from it.
           securityContext:
             # LAB ONLY: the container starts as root because start.sh runs
             # apt, useradd, chown and setpriv. Root only does setup and

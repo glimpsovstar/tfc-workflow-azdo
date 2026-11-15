@@ -24,6 +24,10 @@
 # TFE team token with plan permission only. The build service identity needs
 # "Contribute to pull requests" on the repository for the PR comment.
 #
+# Job timeouts: every job sets timeoutInMinutes from jobTimeoutInMinutes
+# (default 90). Keep it above maxTimeout (default 1h), or Azure DevOps cancels
+# the job while tfci still waits for the run.
+#
 # Step templates are referenced by relative path (../steps/...), which resolves
 # from this file inside the template repository when consumed with @alias.
 # To confirm in the first server-side compile.
@@ -32,9 +36,9 @@ parameters:
     type: string
   - name: organization
     type: string
+  # Required: the token only ever goes to the host named here.
   - name: hostname
     type: string
-    default: app.terraform.io
   # Terraform configuration directory, relative to the repository root.
   - name: directory
     type: string
@@ -64,6 +68,14 @@ parameters:
   - name: maxTimeout
     type: string
     default: 1h
+  # Minutes before Azure DevOps cancels a job. Must exceed maxTimeout.
+  - name: jobTimeoutInMinutes
+    type: number
+    default: 90
+  # tfci TF_LOG: '', ERROR, WARN, INFO or DEBUG. Keep DEBUG out of shared logs as a precaution.
+  - name: logLevel
+    type: string
+    default: ''
   - name: enableValidate
     type: boolean
     default: true
@@ -98,6 +110,7 @@ stages:
           - job: validate
             displayName: Validate (${{ parameters.workspace }})
             pool: ${{ parameters.pool }}
+            timeoutInMinutes: ${{ parameters.jobTimeoutInMinutes }}
             steps:
               - checkout: self
               - template: ../steps/validate.yml
@@ -113,6 +126,7 @@ stages:
       - job: plan
         displayName: Speculative plan (${{ parameters.workspace }})
         pool: ${{ parameters.pool }}
+        timeoutInMinutes: ${{ parameters.jobTimeoutInMinutes }}
         ${{ if eq(parameters.enableValidate, true) }}:
           dependsOn: validate
         variables:
@@ -132,6 +146,7 @@ stages:
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
               maxTimeout: ${{ parameters.maxTimeout }}
+              logLevel: ${{ parameters.logLevel }}
 
           - template: ../steps/run-create.yml
             parameters:
@@ -145,6 +160,7 @@ stages:
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
               maxTimeout: ${{ parameters.maxTimeout }}
+              logLevel: ${{ parameters.logLevel }}
 
           - template: ../steps/plan-output.yml
             parameters:
@@ -161,6 +177,7 @@ stages:
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
               maxTimeout: ${{ parameters.maxTimeout }}
+              logLevel: ${{ parameters.logLevel }}
 
           # Default condition succeededOrFailed(): posts after a failed plan too.
           - template: ../steps/pr-comment.yml

@@ -38,7 +38,7 @@ parameters:
     type: string
     default: $(Agent.TempDirectory)/plan-summary.md
   # Connection parameters, passed through to tfci.yml unchanged. Same
-  # defaults as tfci.yml.
+  # defaults as tfci.yml; hostname is required there too.
   - name: mode
     type: string
     default: docker
@@ -50,7 +50,6 @@ parameters:
     default: hashicorp/tfci:v1.4.0
   - name: hostname
     type: string
-    default: app.terraform.io
   - name: organization
     type: string
   - name: caBundle
@@ -65,6 +64,9 @@ parameters:
   - name: maxTimeout
     type: string
     default: 1h
+  - name: logLevel
+    type: string
+    default: ''
 
   - name: condition
     type: string
@@ -100,6 +102,7 @@ steps:
       workingDirectory: ${{ parameters.workingDirectory }}
       tokenVariable: ${{ parameters.tokenVariable }}
       maxTimeout: ${{ parameters.maxTimeout }}
+      logLevel: ${{ parameters.logLevel }}
 
   - bash: |
       set -euo pipefail

@@ -6,6 +6,7 @@ steps:
       name: show
       displayName: Show run
       organization: demo-org
+      hostname: tfe.example.internal
       command: run show
       textArgs:
         run: $(run.RUN_ID)
@@ -14,6 +15,7 @@ steps:
       name: create
       displayName: Create run
       organization: demo-org
+      hostname: tfe.example.internal
       command: run create
       args: --plan-only=${{ parameters.planOnly }} --refresh=$(REFRESH)
       textArgs:

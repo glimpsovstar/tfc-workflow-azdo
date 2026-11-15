@@ -10,7 +10,22 @@
 #
 # The build service identity needs "Contribute to pull requests" on the repo.
 #
+# Stale builds: before it writes anything, the step reads the PR
+# (lastMergeSourceCommit.commitId) and compares it with this build's
+# System.PullRequest.SourceCommitId. If a newer push exists, it skips both the
+# comment and the status and logs why, so an older build that finishes last
+# cannot overwrite the newer plan. The comment and the status description name
+# the short commit they were planned from.
+#
+# PR status from the run status. The canonical sets are in
+# tests/status_sets_test.rb, which checks the lists in the script below:
+#   PLAN_OK_PR  planned_and_finished, post_plan_completed: succeeded
+#   PLAN_SOFT   policy_soft_failed: failed, "soft-mandatory policy failed:
+#               override in TFE"
+#   anything else (errored, canceled, unknown): failed
+#
 # API reference (REST API 7.1):
+#   Pull Requests, Get: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/get-pull-request?view=azure-devops-rest-7.1
 #   Threads, List:    https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/list?view=azure-devops-rest-7.1
 #   Threads, Create:  https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/create?view=azure-devops-rest-7.1
 #   Comments, Update: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-thread-comments/update?view=azure-devops-rest-7.1
@@ -58,7 +73,8 @@ steps:
       set -euo pipefail
 
       api_version="7.1"
-      ok_states=" planned planned_and_finished cost_estimated policy_checked policy_override "
+      ok_states=" planned_and_finished post_plan_completed " # PLAN_OK_PR
+      soft_states=" policy_soft_failed " # PLAN_SOFT
 
       # A runtime macro that did not resolve arrives as its own text: treat it as empty.
       unresolved() { [[ "$1" == "\$("* ]]; }
@@ -69,7 +85,7 @@ steps:
       done
       status_text="${RUN_STATUS:-unknown}"
 
-      for v in SYSTEM_ACCESSTOKEN COLLECTION_URI PROJECT REPO_ID PR_ID WORKSPACE; do
+      for v in SYSTEM_ACCESSTOKEN COLLECTION_URI PROJECT REPO_ID PR_ID SOURCE_COMMIT WORKSPACE; do
         if [[ -z "${!v:-}" ]]; then
           echo "##vso[task.logissue type=error]pr-comment: $v is empty"
           exit 1
@@ -79,6 +95,11 @@ steps:
         echo "##vso[task.logissue type=error]pr-comment: pull request ID is not a number"
         exit 1
       fi
+      if [[ ! "$SOURCE_COMMIT" =~ ^[0-9a-f]{7,64}$ ]]; then
+        echo "##vso[task.logissue type=error]pr-comment: source commit is not a commit ID"
+        exit 1
+      fi
+      short_commit="${SOURCE_COMMIT:0:8}"
 
       uri_encode() { jq -rn --arg v "$1" '$v | @uri'; }
       base="${COLLECTION_URI%/}/$(uri_encode "$PROJECT")/_apis/git/repositories/$(uri_encode "$REPO_ID")/pullRequests/$PR_ID"
@@ -108,6 +129,14 @@ steps:
         fi
       }
 
+      # Is this build still for the newest push? Pull Requests, Get.
+      api GET "$base?api-version=$api_version"
+      head_commit="$(jq -r '.lastMergeSourceCommit.commitId // empty' "$resp")"
+      if [[ -n "$head_commit" && "$head_commit" != "$SOURCE_COMMIT" ]]; then
+        echo "A newer push exists on this PR (${head_commit:0:8}, this build planned ${short_commit}): skipping the PR comment and status."
+        exit 0
+      fi
+
       # Comment body: marker, then the summary, or a fallback line.
       marker="<!-- tfc-workflow-azdo:${WORKSPACE} -->"
       if [[ -s "$SUMMARY_FILE" ]]; then
@@ -118,7 +147,7 @@ steps:
         summary+=$'\n\n'"Run status: \`${status_text}\`"
         if [[ -n "$RUN_LINK" ]]; then summary+=$'\n\n'"Run: ${RUN_LINK}"; fi
       fi
-      content="${marker}"$'\n'"${summary}"
+      content="${marker}"$'\n'"${summary}"$'\n\n'"Commit: \`${short_commit}\`"
 
       # Who is this build? Only threads whose first comment was written by this
       # identity count as ours, so a marker pasted by someone else is ignored.
@@ -152,16 +181,20 @@ steps:
       fi
 
       # PR status.
-      if [[ "$ok_states" == *" ${RUN_STATUS} "* && -n "$RUN_STATUS" ]]; then
-        state="succeeded"
-      else
-        state="failed"
-      fi
       if [[ -n "$PLAN_ADD" && -n "$PLAN_CHANGE" && -n "$PLAN_DESTROY" ]]; then
         description="Plan: +${PLAN_ADD} ~${PLAN_CHANGE} -${PLAN_DESTROY} (${status_text})"
       else
         description="Terraform run ${status_text}"
       fi
+      if [[ -n "$RUN_STATUS" && "$ok_states" == *" ${RUN_STATUS} "* ]]; then
+        state="succeeded"
+      elif [[ -n "$RUN_STATUS" && "$soft_states" == *" ${RUN_STATUS} "* ]]; then
+        state="failed"
+        description="soft-mandatory policy failed: override in TFE"
+      else
+        state="failed"
+      fi
+      description+=", commit ${short_commit}"
       jq -n \
         --arg state "$state" \
         --arg description "$description" \
@@ -180,6 +213,7 @@ steps:
       PROJECT: $(System.TeamProject)
       REPO_ID: $(Build.Repository.ID)
       PR_ID: $(System.PullRequest.PullRequestId)
+      SOURCE_COMMIT: $(System.PullRequest.SourceCommitId)
       SUMMARY_FILE: ${{ parameters.summaryFile }}
       WORKSPACE: ${{ parameters.workspace }}
       RUN_LINK: ${{ parameters.runLink }}

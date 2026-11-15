@@ -74,6 +74,8 @@ kubectl apply -f lab/azdo-agent/deployment.yaml
 
 The kubelet restarts the container and the sequence starts again at step 1. Each job gets a freshly registered agent and a clean work directory.
 
+**Restart back-off between jobs.** "After containers in a Pod exit, the kubelet restarts them with an exponential backoff delay (10s, 20s, 40s, …), that is capped at 300 seconds (5 minutes)", and it resets the timer only once a container has run for 10 minutes ([Kubernetes, Pod lifecycle, Container restarts](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#restart-policy)). The page makes no exception for exit code 0, so a clean exit after each job counts. With short jobs back to back, the agent can be offline for up to five minutes between jobs, and the pod shows `CrashLoopBackOff` while it waits. That is expected here, not a fault. Queued jobs wait for the agent to come back. One pod per job (see [Production differences](#production-differences)) avoids it.
+
 ```mermaid
 flowchart TD
   start["Container start, root"] --> setup["apt, user azp, CA bundle, read secret files"]
@@ -100,7 +102,7 @@ flowchart TD
 - The agent's own OAuth credential, `/azp/agent/.credentials` and `.credentials_rsaparams`, is readable by jobs because they run as the same user as the agent. This is inherent to any self-hosted agent. It lets a job act as this agent until the registration is removed at the end of the job.
 - The container restarts; the pod is not recreated. The `/azp` emptyDir therefore persists across restarts, which is why `start.sh` wipes `/azp/agent` at every start.
 - The PAT is in `config.sh`'s argv while it configures the agent, which is what Microsoft's own script does. That happens right after a fresh extract, before any job runs. Removal does not run agent code at all: it is a REST call from the root shell with the PAT on stdin.
-- The kubelet applies its restart back-off to clean exits too, so the gap between jobs can grow to a few minutes when jobs are short and frequent.
+- The kubelet applies its restart back-off to clean exits too, so the gap between jobs can grow to five minutes when jobs are short and frequent. See [Start sequence](#start-sequence).
 - The container itself still starts as root with a few capabilities, and apt runs at every start. Both go away with a baked image.
 
 ## Check the agent is online

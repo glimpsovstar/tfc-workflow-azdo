@@ -34,7 +34,7 @@ FILES.each do |rel|
   in_fence = false
   File.readlines(path).each_with_index do |line, i|
     where = "#{rel}:#{i + 1}"
-    problems << "#{where} em dash" if line.include?("—")
+    problems << "#{where} em dash" if line.include?("\u2014")
     in_fence = !in_fence if line.start_with?('```')
     problems << "#{where} box-drawing characters: use a Mermaid diagram" if line =~ /[─-╿]/
     next if in_fence

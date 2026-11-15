@@ -1,8 +1,9 @@
 # Extends template for the main branch: plan, approval, apply.
 #
 #   Stage Plan, job plan: checkout, validate (optional, off by default because
-#     the PR already validated), upload, run-create (a real run, not plan
-#     only), plan-output, then a gate step that logs what happens next.
+#     the PR already validated), upload, run-create (a real run, a saved
+#     plan by default, not plan only), plan-output, then a gate step that logs
+#     what happens next.
 #   Stage Apply, deployment job apply on `environment`: waits for the
 #     environment's checks (approval), then applies the run from the Plan
 #     stage by its ID. It applies that run only, never a newer one.
@@ -13,22 +14,62 @@
 #      The Plan stage fails when it sees the run already applying or applied.
 #   2. On the Azure DevOps environment `environment`, add an Approvals check
 #      and a Branch control check that allows only refs/heads/main.
+#      Add an Exclusive lock check too, so applies run one at a time.
 #   3. On the variable group `applyVariableGroup` (default tfc-apply), which
 #      holds the apply token, add the same Branch control check (refs/heads/main)
 #      and an approval, and grant pipeline permission only to this pipeline.
 #   The Plan stage uses `planVariableGroup` (default tfc-plan), a token with
 #   plan permission only.
 #
-# When does Apply run? Stage condition (Review Focus 1 and 2):
-#   and(succeeded(),
-#       in(dependencies.Plan.outputs['plan.run.RUN_STATUS'],
-#          'planned', 'cost_estimated', 'policy_checked', 'policy_override'))
-#   - cost estimation or policy checks end the plan in cost_estimated or
-#     policy_checked, not planned; those still go to the approval and apply.
+# Run status sets. The canonical lists live in tests/status_sets_test.rb,
+# which fails when the gate `case`, the Apply stage condition or pr-comment.yml
+# drift from them:
+#   APPLYABLE_MAIN  planned, planned_and_saved, cost_estimated, policy_checked,
+#                   post_plan_completed, policy_override
+#   PLAN_OK_PR      planned_and_finished, post_plan_completed (pr-comment.yml)
+#   PLAN_SOFT       policy_soft_failed (pr-comment.yml)
+# tfci's run create waits for one of these (getDesiredRunStatus, run.go,
+# v1.4.0): always policy_soft_failed, planned_and_finished, applied and
+# post_plan_completed; planned_and_saved with savePlan; and for a confirmable
+# run cost_estimated (cost estimation on, policies off), policy_checked and
+# policy_override (policies on), or planned (neither).
+#
+# When does Apply run? Stage condition:
+#   and(succeeded(), in(dependencies.Plan.outputs['plan.run.RUN_STATUS'], <APPLYABLE_MAIN>))
+#   - APPLYABLE_MAIN: the gate step says the Apply stage waits for approval.
+#     policy_override also logs a warning: a policy needs an override in TFE
+#     before the approver approves, or the apply fails with "cannot be applied".
 #   - planned_and_finished (no changes): Apply is skipped. The Plan stage logs
 #     "No changes: nothing to apply" and succeeds, so the run succeeds.
 #   - any other status (for example applied, or policy_soft_failed) fails the
 #     Plan stage in the gate step, so nothing is skipped silently.
+#
+# Saved plans (savePlan, default true): the Plan stage creates a saved-plan run
+# (tfci run create --save-plan). It ends in planned_and_saved and does not lock
+# the workspace or become its current run until the Apply stage applies it
+# (run_create.go, v1.4.0). If the approval is rejected or expires, the saved
+# plan stays behind and does not block the workspace. Re-run the pipeline for
+# a fresh plan rather than applying the old one.
+# Assumption, to confirm in the end-to-end test: tfci run apply applies a
+# planned_and_saved run, that is TFE reports it confirmable. Neither tfci
+# v1.4.0 nor go-tfe says so; the TFE runs API lists planned_and_saved as a
+# state that can be confirmed for apply
+# (developer.hashicorp.com/terraform/enterprise/api-docs/run).
+# Two merges close together plan at once and apply in order (lockBehavior:
+# sequential). Terraform refuses a stale saved plan ("Saved plan is stale",
+# checked with Terraform 1.17.0); assumed TFE does the same, so the second
+# Apply fails safely and needs a re-run. Confirm in the end-to-end test.
+#
+# Concurrency: the Apply stage sets lockBehavior: sequential. With an
+# Exclusive lock check on the environment, runs then take the environment one
+# at a time, in order, instead of the default runLatest (which cancels older
+# runs). lockBehavior can be set on a stage or on the whole pipeline:
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/approvals?view=azure-devops#exclusive-lock
+#   https://learn.microsoft.com/en-us/azure/devops/pipelines/yaml-schema/stages-stage?view=azure-pipelines
+#
+# Job timeouts: every job sets timeoutInMinutes from jobTimeoutInMinutes
+# (default 90). Keep it above maxTimeout (default 1h), or Azure DevOps cancels
+# the job while tfci still waits for the run.
 # Syntax: "Expressions", section "Dependencies", stage to stage example
 #   condition: and(succeeded(), eq(dependencies.A.outputs['A1.printvar.shouldrun'], 'true'))
 #   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/expressions?view=azure-devops#dependencies
@@ -58,9 +99,9 @@ parameters:
     type: string
   - name: organization
     type: string
+  # Required: the token only ever goes to the host named here.
   - name: hostname
     type: string
-    default: app.terraform.io
   # Terraform configuration directory, relative to the repository root.
   - name: directory
     type: string
@@ -94,6 +135,18 @@ parameters:
   - name: maxTimeout
     type: string
     default: 1h
+  # Minutes before Azure DevOps cancels a job. Must exceed maxTimeout.
+  - name: jobTimeoutInMinutes
+    type: number
+    default: 90
+  # Create the main-branch run as a saved plan (see the header).
+  - name: savePlan
+    type: boolean
+    default: true
+  # tfci TF_LOG: '', ERROR, WARN, INFO or DEBUG. Keep DEBUG out of shared logs as a precaution.
+  - name: logLevel
+    type: string
+    default: ''
   # Azure DevOps environment with an approval and a branch control check.
   - name: environment
     type: string
@@ -124,6 +177,7 @@ stages:
       - job: plan
         displayName: Plan (${{ parameters.workspace }})
         pool: ${{ parameters.pool }}
+        timeoutInMinutes: ${{ parameters.jobTimeoutInMinutes }}
         variables:
           - group: ${{ parameters.planVariableGroup }}
         steps:
@@ -152,12 +206,14 @@ stages:
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
               maxTimeout: ${{ parameters.maxTimeout }}
+              logLevel: ${{ parameters.logLevel }}
 
           - template: ../steps/run-create.yml
             parameters:
               workspace: ${{ parameters.workspace }}
               configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
               planOnly: false
+              savePlan: ${{ parameters.savePlan }}
               mode: ${{ parameters.mode }}
               image: ${{ parameters.image }}
               hostname: ${{ parameters.hostname }}
@@ -165,6 +221,7 @@ stages:
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
               maxTimeout: ${{ parameters.maxTimeout }}
+              logLevel: ${{ parameters.logLevel }}
 
           - template: ../steps/plan-output.yml
             parameters:
@@ -181,21 +238,26 @@ stages:
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
               maxTimeout: ${{ parameters.maxTimeout }}
+              logLevel: ${{ parameters.logLevel }}
 
-          # Says what the Apply stage will do. Keep the status list in step
-          # with the Apply stage condition below.
+          # Says what the Apply stage will do. The arms marked APPLYABLE_MAIN
+          # must match the Apply stage condition (tests/status_sets_test.rb).
           - bash: |
               set -euo pipefail
               echo "Workspace Auto apply must be off, or TFE applies before the Azure DevOps approval."
               echo "Run $RUN_ID: $RUN_STATUS ($RUN_LINK)"
               case "$RUN_STATUS" in
-                planned|cost_estimated|policy_checked|policy_override)
+                planned | planned_and_saved | cost_estimated | policy_checked | post_plan_completed) # APPLYABLE_MAIN
                   echo "Changes to apply: the Apply stage waits for the environment approval."
+                  ;;
+                policy_override) # APPLYABLE_MAIN
+                  echo "##vso[task.logissue type=warning]A policy needs an override in TFE before you approve this apply: $RUN_LINK"
+                  echo "Changes to apply: the Apply stage waits for the environment approval. Override the policy in TFE first, or the apply fails."
                   ;;
                 planned_and_finished)
                   echo "No changes: nothing to apply. The Apply stage is skipped."
                   ;;
-                applying|apply_queued|applied|confirmed)
+                applying | apply_queued | applied | confirmed)
                   echo "##vso[task.logissue type=error]Run $RUN_ID is already $RUN_STATUS without an approval: turn Auto apply off on the workspace."
                   exit 1
                   ;;
@@ -214,11 +276,16 @@ stages:
   - stage: Apply
     displayName: Apply
     dependsOn: Plan
-    condition: and(succeeded(), in(dependencies.Plan.outputs['plan.run.RUN_STATUS'], 'planned', 'cost_estimated', 'policy_checked', 'policy_override'))
+    # APPLYABLE_MAIN. Keep in step with the gate step (tests/status_sets_test.rb).
+    condition: and(succeeded(), in(dependencies.Plan.outputs['plan.run.RUN_STATUS'], 'planned', 'planned_and_saved', 'cost_estimated', 'policy_checked', 'post_plan_completed', 'policy_override'))
+    # Runs take the environment one at a time, in order, when it has an
+    # Exclusive lock check (see the header).
+    lockBehavior: sequential
     jobs:
       - deployment: apply
         displayName: Apply (${{ parameters.workspace }})
         pool: ${{ parameters.pool }}
+        timeoutInMinutes: ${{ parameters.jobTimeoutInMinutes }}
         environment: ${{ parameters.environment }}
         # Job level, not stage level (stage level is unverified for this).
         variables:
@@ -242,3 +309,4 @@ stages:
                     caBundle: ${{ parameters.caBundle }}
                     tokenVariable: ${{ parameters.tokenVariable }}
                     maxTimeout: ${{ parameters.maxTimeout }}
+                    logLevel: ${{ parameters.logLevel }}

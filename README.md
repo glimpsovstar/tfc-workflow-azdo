@@ -53,6 +53,10 @@ extends:
       name: tfe-agents
 ```
 
+The tag `v2.0.0` is created when this version is released. Until it exists, `ref: refs/tags/v2.0.0` does not resolve and the pipeline fails to start; pin a branch or commit for testing before then.
+
+`hostname` is required on both pipeline templates (`app.terraform.io` for HCP Terraform). Add a Required template check on the variable groups and the PR agent pool ([setup.md](docs/setup.md#10-required-template-checks)), so a PR cannot swap the pipeline for its own and use the plan token.
+
 Full examples:
 
 - [`examples/azure-pipelines.pr.yml`](examples/azure-pipelines.pr.yml): the PR pipeline (`speculative-run.yml`).

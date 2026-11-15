@@ -34,7 +34,7 @@ Extends template for pull request validation builds: a speculative (plan-only) r
 | --- | --- | --- | --- | --- |
 | `workspace` | string |  | yes | Workspace name in the organization. |
 | `organization` | string |  | yes | HCP Terraform or TFE organization name. |
-| `hostname` | string | `app.terraform.io` | no | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. |
+| `hostname` | string |  | yes | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. Required, so the token only goes to a host the caller names (`app.terraform.io` for HCP Terraform). |
 | `directory` | string | `./` | no | Terraform configuration directory, relative to the repository root. |
 | `pool` | object |  | yes | Agent pool for the jobs, for example `{name: tfe-agents}`. |
 | `mode` | string | `docker` | no | `docker`: run the pinned image. `native`: run the binaries on the agent PATH. Allowed: `docker`, `native`. |
@@ -43,6 +43,8 @@ Extends template for pull request validation builds: a speculative (plan-only) r
 | `variableGroup` | string | `tfc-plan` | no | Variable group with the plan token. |
 | `tokenVariable` | string | `TF_API_TOKEN` | no | Name of the secret pipeline variable that holds the token. Mapped to `TF_API_TOKEN` through `env:`. |
 | `maxTimeout` | string | `1h` | no | Set as `TF_MAX_TIMEOUT`: how long tfci waits for the run. |
+| `jobTimeoutInMinutes` | number | `90` | no | `timeoutInMinutes` of every job. Must exceed `maxTimeout`, or Azure DevOps cancels the job while tfci still waits. |
+| `logLevel` | string | `''` | no | tfci log level, set as `TF_LOG` (`-e TF_LOG` in docker mode): empty (off), `ERROR`, `WARN`, `INFO` or `DEBUG`. Keep DEBUG out of shared logs as a precaution. |
 | `enableValidate` | boolean | `true` | no | Run validate.yml (fmt, init and validate, tflint) before the plan. |
 | `enableTflint` | boolean | `true` | no | Run tflint in validate.yml. |
 | `terraformImage` | string | `hashicorp/terraform:1.17.0` | no | Terraform image for docker mode. |
@@ -79,7 +81,7 @@ Extends template for the main branch: plan, approval, apply.
 | --- | --- | --- | --- | --- |
 | `workspace` | string |  | yes | Workspace name in the organization. |
 | `organization` | string |  | yes | HCP Terraform or TFE organization name. |
-| `hostname` | string | `app.terraform.io` | no | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. |
+| `hostname` | string |  | yes | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. Required, so the token only goes to a host the caller names (`app.terraform.io` for HCP Terraform). |
 | `directory` | string | `./` | no | Terraform configuration directory, relative to the repository root. |
 | `pool` | object |  | yes | Agent pool for the jobs, for example `{name: tfe-agents}`. |
 | `mode` | string | `docker` | no | `docker`: run the pinned image. `native`: run the binaries on the agent PATH. Allowed: `docker`, `native`. |
@@ -89,6 +91,9 @@ Extends template for the main branch: plan, approval, apply.
 | `applyVariableGroup` | string | `tfc-apply` | no | Variable group for the Apply stage, with the apply token. |
 | `tokenVariable` | string | `TF_API_TOKEN` | no | Name of the secret pipeline variable that holds the token. Mapped to `TF_API_TOKEN` through `env:`. |
 | `maxTimeout` | string | `1h` | no | Set as `TF_MAX_TIMEOUT`: how long tfci waits for the run. |
+| `jobTimeoutInMinutes` | number | `90` | no | `timeoutInMinutes` of every job. Must exceed `maxTimeout`, or Azure DevOps cancels the job while tfci still waits. |
+| `savePlan` | boolean | `true` | no | Create the main-branch run as a saved plan (`--save-plan`). A rejected or expired approval then leaves a saved plan that does not block the workspace. |
+| `logLevel` | string | `''` | no | tfci log level, set as `TF_LOG` (`-e TF_LOG` in docker mode): empty (off), `ERROR`, `WARN`, `INFO` or `DEBUG`. Keep DEBUG out of shared logs as a precaution. |
 | `environment` | string |  | yes | Azure DevOps environment for the Apply deployment job. Give it an approval and a branch control check. |
 | `enableValidate` | boolean | `false` | no | Run validate.yml (fmt, init and validate, tflint) before the plan. |
 | `enableTflint` | boolean | `true` | no | Run tflint in validate.yml. |
@@ -133,13 +138,14 @@ One step that runs any tfci command: `tfci <command> --json <args> <textArgs>`.
 | `textArgs` | object | `{}` | no | Map of flag name to value. Each becomes one argument `--<name>=<value>`, passed through env. |
 | `mode` | string | `docker` | no | `docker`: run the pinned image. `native`: run the binaries on the agent PATH. Allowed: `docker`, `native`. |
 | `image` | string | `hashicorp/tfci:v1.4.0` | no | tfci image for docker mode. Pin it, ideally by digest. |
-| `hostname` | string | `app.terraform.io` | no | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. |
+| `hostname` | string |  | yes | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. Required, so the token only goes to a host the caller names (`app.terraform.io` for HCP Terraform). |
 | `organization` | string |  | yes | HCP Terraform or TFE organization name. |
 | `caBundle` | string | `''` | no | Absolute path on the agent to a PEM file with the private CA for TFE. Added to the system roots through `SSL_CERT_DIR`. |
 | `workingDirectory` | string | `$(System.DefaultWorkingDirectory)` | no | Directory tfci runs in (mounted at `/tfci/workspace` in docker mode). |
 | `tokenVariable` | string | `TF_API_TOKEN` | no | Name of the secret pipeline variable that holds the token. Mapped to `TF_API_TOKEN` through `env:`. |
 | `maxTimeout` | string | `1h` | no | Set as `TF_MAX_TIMEOUT`: how long tfci waits for the run. |
 | `outputFile` | string | `''` | no | File for tfci's JSON output. Empty: `$(Agent.TempDirectory)/tfci-<name>.json`. |
+| `logLevel` | string | `''` | no | tfci log level, set as `TF_LOG` (`-e TF_LOG` in docker mode): empty (off), `ERROR`, `WARN`, `INFO` or `DEBUG`. Keep DEBUG out of shared logs as a precaution. |
 | `condition` | string | `succeeded()` | no | Step condition. |
 
 Outputs: none.
@@ -159,12 +165,13 @@ Upload a directory as a new configuration version: `tfci upload --json`.
 | `speculative` | boolean | `false` | no | Upload a speculative configuration version (plan only, for PRs). |
 | `mode` | string | `docker` | no | `docker`: run the pinned image. `native`: run the binaries on the agent PATH. Allowed: `docker`, `native`. |
 | `image` | string | `hashicorp/tfci:v1.4.0` | no | tfci image for docker mode. Pin it, ideally by digest. |
-| `hostname` | string | `app.terraform.io` | no | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. |
+| `hostname` | string |  | yes | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. Required, so the token only goes to a host the caller names (`app.terraform.io` for HCP Terraform). |
 | `organization` | string |  | yes | HCP Terraform or TFE organization name. |
 | `caBundle` | string | `''` | no | Absolute path on the agent to a PEM file with the private CA for TFE. Added to the system roots through `SSL_CERT_DIR`. |
 | `workingDirectory` | string | `$(System.DefaultWorkingDirectory)` | no | Directory tfci runs in (mounted at `/tfci/workspace` in docker mode). |
 | `tokenVariable` | string | `TF_API_TOKEN` | no | Name of the secret pipeline variable that holds the token. Mapped to `TF_API_TOKEN` through `env:`. |
 | `maxTimeout` | string | `1h` | no | Set as `TF_MAX_TIMEOUT`: how long tfci waits for the run. |
+| `logLevel` | string | `''` | no | tfci log level, set as `TF_LOG` (`-e TF_LOG` in docker mode): empty (off), `ERROR`, `WARN`, `INFO` or `DEBUG`. Keep DEBUG out of shared logs as a precaution. |
 
 Outputs (step name from the `name` parameter; the default is shown):
 
@@ -185,15 +192,17 @@ Create a run on a given configuration version and wait for the plan: `tfci run c
 | `workspace` | string |  | yes | Workspace name in the organization. |
 | `configurationVersionId` | string |  | yes | Configuration version ID (`cv-...`), from upload.yml. |
 | `planOnly` | boolean | `false` | no | Create a plan-only (speculative) run. |
+| `savePlan` | boolean | `false` | no | Create a saved-plan run (`--save-plan`). It ends in `planned_and_saved` and does not lock the workspace until it is applied. |
 | `message` | string | `Azure DevOps build $(Build.BuildId)` | no | Run message. No user-controlled text. |
 | `mode` | string | `docker` | no | `docker`: run the pinned image. `native`: run the binaries on the agent PATH. Allowed: `docker`, `native`. |
 | `image` | string | `hashicorp/tfci:v1.4.0` | no | tfci image for docker mode. Pin it, ideally by digest. |
-| `hostname` | string | `app.terraform.io` | no | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. |
+| `hostname` | string |  | yes | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. Required, so the token only goes to a host the caller names (`app.terraform.io` for HCP Terraform). |
 | `organization` | string |  | yes | HCP Terraform or TFE organization name. |
 | `caBundle` | string | `''` | no | Absolute path on the agent to a PEM file with the private CA for TFE. Added to the system roots through `SSL_CERT_DIR`. |
 | `workingDirectory` | string | `$(System.DefaultWorkingDirectory)` | no | Directory tfci runs in (mounted at `/tfci/workspace` in docker mode). |
 | `tokenVariable` | string | `TF_API_TOKEN` | no | Name of the secret pipeline variable that holds the token. Mapped to `TF_API_TOKEN` through `env:`. |
 | `maxTimeout` | string | `1h` | no | Set as `TF_MAX_TIMEOUT`: how long tfci waits for the run. |
+| `logLevel` | string | `''` | no | tfci log level, set as `TF_LOG` (`-e TF_LOG` in docker mode): empty (off), `ERROR`, `WARN`, `INFO` or `DEBUG`. Keep DEBUG out of shared logs as a precaution. |
 
 Outputs (step name from the `name` parameter; the default is shown):
 
@@ -223,12 +232,13 @@ Read a plan's resource counts and write a markdown summary: `tfci plan output --
 | `summaryFile` | string | `$(Agent.TempDirectory)/plan-summary.md` | no | Markdown summary file. |
 | `mode` | string | `docker` | no | `docker`: run the pinned image. `native`: run the binaries on the agent PATH. Allowed: `docker`, `native`. |
 | `image` | string | `hashicorp/tfci:v1.4.0` | no | tfci image for docker mode. Pin it, ideally by digest. |
-| `hostname` | string | `app.terraform.io` | no | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. |
+| `hostname` | string |  | yes | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. Required, so the token only goes to a host the caller names (`app.terraform.io` for HCP Terraform). |
 | `organization` | string |  | yes | HCP Terraform or TFE organization name. |
 | `caBundle` | string | `''` | no | Absolute path on the agent to a PEM file with the private CA for TFE. Added to the system roots through `SSL_CERT_DIR`. |
 | `workingDirectory` | string | `$(System.DefaultWorkingDirectory)` | no | Directory tfci runs in (mounted at `/tfci/workspace` in docker mode). |
 | `tokenVariable` | string | `TF_API_TOKEN` | no | Name of the secret pipeline variable that holds the token. Mapped to `TF_API_TOKEN` through `env:`. |
 | `maxTimeout` | string | `1h` | no | Set as `TF_MAX_TIMEOUT`: how long tfci waits for the run. |
+| `logLevel` | string | `''` | no | tfci log level, set as `TF_LOG` (`-e TF_LOG` in docker mode): empty (off), `ERROR`, `WARN`, `INFO` or `DEBUG`. Keep DEBUG out of shared logs as a precaution. |
 | `condition` | string | `succeeded()` | no | Step condition. |
 
 Outputs (step name from the `name` parameter; the default is shown):
@@ -253,12 +263,13 @@ Apply a run that is waiting for confirmation: `tfci run apply --json`.
 | `comment` | string | `Applied by Azure DevOps build $(Build.BuildId)` | no | Apply comment. No user-controlled text. |
 | `mode` | string | `docker` | no | `docker`: run the pinned image. `native`: run the binaries on the agent PATH. Allowed: `docker`, `native`. |
 | `image` | string | `hashicorp/tfci:v1.4.0` | no | tfci image for docker mode. Pin it, ideally by digest. |
-| `hostname` | string | `app.terraform.io` | no | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. |
+| `hostname` | string |  | yes | HCP Terraform or TFE hostname, set as `TF_HOSTNAME` for tfci. Required, so the token only goes to a host the caller names (`app.terraform.io` for HCP Terraform). |
 | `organization` | string |  | yes | HCP Terraform or TFE organization name. |
 | `caBundle` | string | `''` | no | Absolute path on the agent to a PEM file with the private CA for TFE. Added to the system roots through `SSL_CERT_DIR`. |
 | `workingDirectory` | string | `$(System.DefaultWorkingDirectory)` | no | Directory tfci runs in (mounted at `/tfci/workspace` in docker mode). |
 | `tokenVariable` | string | `TF_API_TOKEN` | no | Name of the secret pipeline variable that holds the token. Mapped to `TF_API_TOKEN` through `env:`. |
 | `maxTimeout` | string | `1h` | no | Set as `TF_MAX_TIMEOUT`: how long tfci waits for the run. |
+| `logLevel` | string | `''` | no | tfci log level, set as `TF_LOG` (`-e TF_LOG` in docker mode): empty (off), `ERROR`, `WARN`, `INFO` or `DEBUG`. Keep DEBUG out of shared logs as a precaution. |
 
 Outputs (step name from the `name` parameter; the default is shown):
 

@@ -2,8 +2,9 @@
 # `tfci run create --json`.
 #
 # tfci blocks until the plan reaches a terminal state (planned, cost_estimated,
-# policy_checked, planned_and_finished, ...) and exits 1 when the run errors,
-# is canceled or discarded, or TF_MAX_TIMEOUT (maxTimeout) passes.
+# policy_checked, planned_and_finished, planned_and_saved with savePlan, ...)
+# and exits 1 when the run errors, is canceled or discarded, or
+# TF_MAX_TIMEOUT (maxTimeout) passes.
 #
 # Output variables (step name = the `name` parameter, default "run"):
 #   RUN_ID, RUN_STATUS, PLAN_ID, PLAN_STATUS, RUN_LINK
@@ -34,11 +35,17 @@ parameters:
   - name: planOnly
     type: boolean
     default: false
+  # A saved-plan run (tfci --save-plan). It plans and runs its checks at once,
+  # but does not lock the workspace or become its current run until it is
+  # applied (run_create.go, v1.4.0). It ends the plan in planned_and_saved.
+  - name: savePlan
+    type: boolean
+    default: false
   - name: message
     type: string
     default: Azure DevOps build $(Build.BuildId)
   # Connection parameters, passed through to tfci.yml unchanged. Same
-  # defaults as tfci.yml.
+  # defaults as tfci.yml; hostname is required there too.
   - name: mode
     type: string
     default: docker
@@ -50,7 +57,6 @@ parameters:
     default: hashicorp/tfci:v1.4.0
   - name: hostname
     type: string
-    default: app.terraform.io
   - name: organization
     type: string
   - name: caBundle
@@ -65,6 +71,9 @@ parameters:
   - name: maxTimeout
     type: string
     default: 1h
+  - name: logLevel
+    type: string
+    default: ''
 
 steps:
   - bash: |
@@ -83,7 +92,7 @@ steps:
       name: ${{ parameters.name }}_tfci
       displayName: ${{ parameters.displayName }}
       command: run create
-      args: --plan-only=${{ parameters.planOnly }}
+      args: --plan-only=${{ parameters.planOnly }} --save-plan=${{ parameters.savePlan }}
       textArgs:
         workspace: ${{ parameters.workspace }}
         configuration_version: ${{ parameters.configurationVersionId }}
@@ -97,6 +106,7 @@ steps:
       workingDirectory: ${{ parameters.workingDirectory }}
       tokenVariable: ${{ parameters.tokenVariable }}
       maxTimeout: ${{ parameters.maxTimeout }}
+      logLevel: ${{ parameters.logLevel }}
 
   - bash: |
       set -euo pipefail

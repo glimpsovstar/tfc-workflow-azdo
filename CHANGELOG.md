@@ -14,10 +14,21 @@ A rebuild after a full review on 2026-11-15. v1 pipelines do not carry over: con
 - PR feedback from the pipeline: a PR thread updated in place and a PR status, through the Azure DevOps REST API.
 - Examples pinned by tag (`examples/azure-pipelines.pr.yml`, `examples/azure-pipelines.main.yml`) and a smoke test (`examples/smoke-test.yml`).
 - Lab agent as a Kubernetes pod in native mode (`lab/azdo-agent/`).
+- `apply-run.yml` creates the main-branch run as a saved plan (`savePlan`, default `true`; `run-create.yml` takes `savePlan`, default `false`). A rejected or expired approval leaves a saved plan that does not block the workspace. The Apply stage sets `lockBehavior: sequential`.
+- `jobTimeoutInMinutes` (default 90) on both pipeline templates, set as `timeoutInMinutes` on every job.
+- `logLevel` on every tfci template, set as `TF_LOG` for tfci.
+- The gate warns when a run waits in `policy_override`; `run-apply.yml` explains a run that cannot be applied.
+- `pr-comment.yml` skips the comment and the status when a newer push exists on the PR, and names the short commit in both.
+- Tests: canonical run status sets (`tests/status_sets_test.rb`), output variable references (`tests/output_refs_test.rb`) and the step scripts against a fake tfci (`tests/steps_fake_tfci_test.sh`).
+- Docs: Required template checks on the variable groups and the PR agent pool.
 - Local tests, run with `bash tests/run.sh`: template checker and its self-tests, tfci command manifests for v1.4.0 and v1.5.0, shellcheck on every template script, a fake Azure DevOps API test for the PR comment, Terraform checks on the fixture, and a check that `docs/reference.md` matches the templates.
 - Docs: setup, private TFE, internal registry, security, a generated reference, troubleshooting.
 
 ### Changed
+
+- `hostname` is required on every template that calls tfci; there is no `app.terraform.io` default.
+- Native mode runs tfci under `env -i` with an allowlist, so no `TF_VAR_*` from the agent or pipeline reaches a run.
+- PR status: `planned_and_finished` and `post_plan_completed` succeed; `policy_soft_failed` fails with "soft-mandatory policy failed: override in TFE".
 
 - Consumers `extends` the templates from a repository resource pinned to a tag, instead of copying pipeline files.
 - Images are pinned and are parameters: `hashicorp/tfci:v1.4.0`, `hashicorp/terraform:1.17.0`, `ghcr.io/terraform-linters/tflint:v0.66.0`.
