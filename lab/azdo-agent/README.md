@@ -70,7 +70,7 @@ kubectl apply -f lab/azdo-agent/deployment.yaml
 5. Wipe `/azp/agent`, including `_work`, download and extract the agent there, then `chown -R azp:azp /azp/agent`.
 6. Export `PATH` (with `/opt/tools/bin` for `tfci`), then configure the agent as `azp` through `setpriv`: UID and GID 1001, empty capability bounding set, `no_new_privs`.
 7. Run `./run.sh --once` as `azp`, as a child of the root shell, and wait. The agent takes one job, then exits.
-8. An `EXIT` trap in the root shell stops the agent if it is still running, kills any leftover UID 1001 process, then removes the agent registration as `azp` with up to 10 retries, and exits 0.
+8. An `EXIT` trap in the root shell stops the agent if it is still running, kills any leftover UID 1001 process, keeps killing until none remain, then deregisters the agent through the Azure DevOps REST API from the root shell (pool and agent looked up by name, PAT on curl's stdin, up to 10 retries), and exits 0. No agent code runs while the PAT is in use, because jobs can write the agent's files.
 
 The kubelet restarts the container and the sequence starts again at step 1. Each job gets a freshly registered agent and a clean work directory.
 
@@ -80,7 +80,7 @@ flowchart TD
   setup --> wipe["Wipe /azp/agent, download agent, chown to azp"]
   wipe --> config["config.sh as UID 1001 (setpriv)"]
   config --> run["run.sh --once as UID 1001"]
-  run -->|"one job done, or SIGTERM"| cleanup["Root trap: kill UID 1001 processes, config.sh remove"]
+  run -->|"one job done, or SIGTERM"| cleanup["Root trap: kill UID 1001 processes, deregister via REST API"]
   cleanup -->|"exit 0, kubelet restarts the container"| start
 ```
 
@@ -99,7 +99,7 @@ flowchart TD
 
 - The agent's own OAuth credential, `/azp/agent/.credentials` and `.credentials_rsaparams`, is readable by jobs because they run as the same user as the agent. This is inherent to any self-hosted agent. It lets a job act as this agent until the registration is removed at the end of the job.
 - The container restarts; the pod is not recreated. The `/azp` emptyDir therefore persists across restarts, which is why `start.sh` wipes `/azp/agent` at every start.
-- The PAT is in `config.sh`'s argv while it configures and removes the agent, which is what Microsoft's own script does. No job is running at configure time, and cleanup kills every UID 1001 process before it removes the agent.
+- The PAT is in `config.sh`'s argv while it configures the agent, which is what Microsoft's own script does. That happens right after a fresh extract, before any job runs. Removal does not run agent code at all: it is a REST call from the root shell with the PAT on stdin.
 - The kubelet applies its restart back-off to clean exits too, so the gap between jobs can grow to a few minutes when jobs are short and frequent.
 - The container itself still starts as root with a few capabilities, and apt runs at every start. Both go away with a baked image.
 

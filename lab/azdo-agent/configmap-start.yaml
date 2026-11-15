@@ -100,6 +100,13 @@ data:
 
     # Remove the agent registration from the pool. Runs in this root shell,
     # which still holds TOKEN.
+    # Call the Azure DevOps REST API with the PAT on stdin (curl config), never in argv.
+    azp_api() {
+      printf 'user = "user:%s"\n' "${TOKEN}" | curl --fail -sS -K - -X "$1" -H "Accept: application/json" "$2"
+    }
+
+    AGENT_NAME="${AZP_AGENT_NAME:-$(hostname)}"
+
     cleanup() {
       trap "" EXIT INT TERM
 
@@ -113,27 +120,43 @@ data:
         done
       fi
 
-      # Kill anything a job left behind as UID 1001, so no job process is
-      # alive to read the token from config.sh's argv below.
-      pkill -KILL -u "${AZP_UID}" 2>/dev/null || true
-
-      if [ -e "${AGENT_DIR}/.agent" ]; then
-        print_header "Cleanup. Removing Azure Pipelines agent..."
-
-        cd "${AGENT_DIR}"
-        local max_attempts=10
-        local attempt=1
-        while [ "${attempt}" -le "${max_attempts}" ]; do
-          as_azp ./config.sh remove --unattended --auth PAT --token "${TOKEN}" && break
-
-          echo "Attempt ${attempt} failed. Retrying in 30 seconds..."
-          attempt=$((attempt+1))
-          sleep 30
-        done
-        if [ "${attempt}" -gt "${max_attempts}" ]; then
-          echo 1>&2 "warning: failed to remove agent configuration after ${max_attempts} attempts"
-        fi
+      # Kill everything a job left behind as UID 1001, and keep killing until
+      # none remain, so no job process is alive while the token is in use.
+      for _ in $(seq 1 20); do
+        pgrep -u "${AZP_UID}" >/dev/null 2>&1 || break
+        pkill -KILL -u "${AZP_UID}" 2>/dev/null || true
+        sleep 0.5
+      done
+      if pgrep -u "${AZP_UID}" >/dev/null 2>&1; then
+        echo 1>&2 "warning: UID ${AZP_UID} processes still running; not using the token. Remove agent ${AGENT_NAME} from the pool by hand."
+        return 0
       fi
+
+      # Deregister through the REST API from this root shell. No agent code runs
+      # here: files under ${AGENT_DIR} are writable by jobs and are not trusted,
+      # so the pool and agent IDs are looked up by name, and the PAT goes to curl
+      # on stdin. Docs: learn.microsoft.com/rest/api/azure/devops/distributedtask/agents (7.1).
+      print_header "Cleanup. Removing Azure Pipelines agent ${AGENT_NAME}..."
+      local pool_q agent_q pool_id agent_id attempt
+      pool_q="$(jq -rn --arg v "${AZP_POOL}" '$v|@uri')"
+      agent_q="$(jq -rn --arg v "${AGENT_NAME}" '$v|@uri')"
+      for attempt in $(seq 1 10); do
+        pool_id="$(azp_api GET "${AZP_URL}/_apis/distributedtask/pools?poolName=${pool_q}&api-version=7.1" | jq -r '.value[0].id // empty')" || pool_id=""
+        if [ -n "${pool_id}" ]; then
+          agent_id="$(azp_api GET "${AZP_URL}/_apis/distributedtask/pools/${pool_id}/agents?agentName=${agent_q}&api-version=7.1" | jq -r '.value[0].id // empty')" || agent_id=""
+          if [ -z "${agent_id}" ]; then
+            echo "Agent ${AGENT_NAME} is not registered. Nothing to remove."
+            return 0
+          fi
+          if azp_api DELETE "${AZP_URL}/_apis/distributedtask/pools/${pool_id}/agents/${agent_id}?api-version=7.1" >/dev/null; then
+            echo "Removed agent ${AGENT_NAME}."
+            return 0
+          fi
+        fi
+        echo "Attempt ${attempt} failed. Retrying in 30 seconds..."
+        sleep 30
+      done
+      echo 1>&2 "warning: failed to remove agent ${AGENT_NAME} after 10 attempts"
     }
 
     print_header "3. Determining matching Azure Pipelines agent..."
@@ -183,7 +206,7 @@ data:
     # No job is running yet, and /proc/<pid>/cmdline of this process is only
     # visible inside the container.
     as_azp ./config.sh --unattended \
-      --agent "${AZP_AGENT_NAME:-$(hostname)}" \
+      --agent "${AGENT_NAME}" \
       --url "${AZP_URL}" \
       --auth PAT \
       --token "${TOKEN}" \
