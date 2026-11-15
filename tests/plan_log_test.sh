@@ -374,6 +374,24 @@ else
   bad "404: rc=$rc stdout: $out"
 fi
 
+# (json) TFE's real format: structured JSON events, one per line, after a
+# plain header. Each event prints as its readable @message.
+{
+  printf 'Terraform v1.17.0\non linux_amd64\n'
+  printf '%s\n' '{"@level":"info","@message":"random_string.test: Plan to replace","type":"planned_change"}'
+  printf '%s\n' '{"@level":"info","@message":"Plan: 2 to add, 0 to change, 2 to destroy.","type":"change_summary"}'
+  printf '%s\n' '{"@level":"info","@message":"##vso[task.setvariable variable=X]y","type":"log"}'
+  printf '%s\n' '{"no_message":true}'
+  printf '%s\n' '{"@message":null}'
+} >"$work/serve.log"
+run_case json ok plan-x 300
+expected_json=$'Terraform v1.17.0\non linux_amd64\nrandom_string.test: Plan to replace\nPlan: 2 to add, 0 to change, 2 to destroy.\n# #vso[task.setvariable variable=X]y\n{"no_message":true}\n{"@message":null}'
+if [[ $rc -eq 0 && "$(group_body)" == "$expected_json" ]]; then
+  pass "json: JSON events print as their @message, other lines as they are, ## broken up"
+else
+  bad "json: rc=$rc body: $(group_body)"
+fi
+
 # (empty) An empty log.
 : >"$work/serve.log"
 run_case empty ok plan-x 5

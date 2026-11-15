@@ -8,7 +8,8 @@
 #   1. GET https://<hostname>/api/v2/plans/<planId> with the token.
 #   2. Reads data.attributes.log-read-url and fetches that URL WITHOUT the
 #      Authorization header.
-#   3. Strips ANSI colour codes and other control characters, and breaks up
+#   3. Turns TFE's JSON log events into their readable @message lines,
+#      strips ANSI colour codes and other control characters, and breaks up
 #      every `##` in the log text (`##` becomes `# #`, repeated until none is
 #      left), so no Azure DevOps logging command survives in any spelling:
 #      `##vso[`, `##VSO[`, `##[error]`, or `##` followed by an invisible
@@ -203,8 +204,16 @@ steps:
       # and break up every "##" so the log text cannot hold a logging command
       # in any spelling. The loop repeats until no "##" is left ("###" needs
       # two passes). awk ends the last line with a newline.
+      # TFE stores the plan log as structured JSON, one event per line. Print
+      # each event's human-readable "@message" (what TFE's UI shows); keep any
+      # line that is not such JSON (the "Terraform v..." header) as it is.
+      if ! jq -Rr '. as $l | (try fromjson catch null) as $j
+          | if ($j | type) == "object" and (($j["@message"] | type) == "string") then $j["@message"] else $l end' \
+          "$tmp/raw.log" >"$tmp/msg.log" 2>/dev/null; then
+        cp "$tmp/raw.log" "$tmp/msg.log"
+      fi
       esc=$'\033'
-      LC_ALL=C sed -e "s/${esc}\[[0-9;?]*[A-Za-z]//g" "$tmp/raw.log" |
+      LC_ALL=C sed -e "s/${esc}\[[0-9;?]*[A-Za-z]//g" "$tmp/msg.log" |
         LC_ALL=C tr -d '\000-\010\013-\037\177' |
         LC_ALL=C sed -e ':a' -e 's/##/# #/g' -e 'ta' |
         LC_ALL=C awk '{ print }' >"$tmp/plan.log"
