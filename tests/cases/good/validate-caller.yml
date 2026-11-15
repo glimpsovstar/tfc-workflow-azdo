@@ -1,0 +1,14 @@
+# Calls the real validate step template. A leading / resolves from the repo
+# root, so no ../ is needed.
+trigger: none
+
+pool:
+  vmImage: ubuntu-24.04
+
+steps:
+  - checkout: self
+  - template: /templates/steps/validate.yml
+    parameters:
+      directory: $(Build.SourcesDirectory)/tests/fixtures/random
+      enableTflint: true
+      cliConfigFile: ''
