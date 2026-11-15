@@ -194,6 +194,10 @@ parameters:
   - name: enableTflint
     type: boolean
     default: true
+  # Allow tflint to download plugins named in .tflint.hcl. Only for trusted code.
+  - name: tflintPluginInit
+    type: boolean
+    default: false
   # Validate step images and settings (see templates/steps/validate.yml).
   - name: terraformImage
     type: string
@@ -240,6 +244,7 @@ stages:
                   terraformImage: ${{ parameters.terraformImage }}
                   tflintImage: ${{ parameters.tflintImage }}
                   enableTflint: ${{ parameters.enableTflint }}
+                  tflintPluginInit: ${{ parameters.tflintPluginInit }}
                   caBundle: ${{ parameters.validateCaBundle }}
                   cliConfigFile: ${{ parameters.cliConfigFile }}
 

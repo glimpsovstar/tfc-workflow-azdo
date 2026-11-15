@@ -137,3 +137,12 @@ The lab runs the agent as a Kubernetes pod in native mode: jobs run as UID 1001 
 - **In `pipeline` mode the approver approves in Azure DevOps, away from the plan.** The plan text is in the Plan job's log (`showPlanLog`), but approvers should open the run link and read the plan and policy results in TFE. `applyMethod: tfe` puts the approval on the plan itself.
 - **The plan text shows non-sensitive values** in the job log and, when `showPlanLog` is turned on for PRs, in the PR comment, as above.
 - **Tag pins are mutable.** Until images are pinned by digest, a re-pushed tag changes what runs.
+
+## tflint plugins on pull requests
+
+tflint runs plugins, and on a PR the repository's `.tflint.hcl` comes from the PR author. It can name a plugin to download (`source =`) or point `plugin_dir` at a binary committed in the PR, and tflint runs either. So by default (`tflintPluginInit: false`) the validate step ignores the repository's `.tflint.hcl` altogether and lints with a pipeline-owned config that holds only the bundled terraform ruleset. Set `tflintPluginInit: true` only for trusted code (for example the main branch): the repository's config is then used and its plugins downloaded. `GITHUB_TOKEN` is never passed to tflint. Both paths are tested, including the `plugin_dir` case with the real tflint (`tests/validate_tflint_test.sh`).
+
+Limits:
+
+- PR pipelines cannot turn it on: `speculative-run.yml` passes `tflintPluginInit: false` to the validate step and does not take the parameter, so a PR's own pipeline YAML cannot change it (a Required template check, setup step 10, makes sure PR pipelines extend that template). Only `apply-run.yml` offers the setting.
+- `terraform init` in the same validate job downloads and runs the providers and modules the PR names. Restrict sources with a provider mirror through `cliConfigFile`, and remember the validate job holds no TFE token.

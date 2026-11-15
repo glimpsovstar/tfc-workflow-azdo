@@ -24,11 +24,16 @@
 #   as SSL_CERT_FILE for init, which replaces the system roots, so the bundle
 #   must also hold any public roots init still needs.
 #
-#   `tflint --init` downloads plugins from GitHub. It runs only when the
-#   directory's .tflint.hcl has a `source =` line (a plugin to download). The
-#   bundled terraform ruleset needs no download. With no internet access, keep
-#   to the bundled ruleset or bake plugins into the image or agent. tflint uses
-#   GITHUB_TOKEN from the agent environment, if set, to avoid rate limits.
+#   `tflint --init` downloads plugins from GitHub and tflint then runs them.
+#   On a PR, .tflint.hcl comes from the PR author, so a plugin `source =` line
+#   could point at any binary. Plugins are therefore downloaded only when the
+#   pipeline sets tflintPluginInit: true (do that only for trusted code, such
+#   as main). Otherwise the repository's .tflint.hcl is ignored altogether (it
+#   could also set plugin_dir to a binary committed in the PR) and tflint runs
+#   with a pipeline-owned config holding only the bundled terraform ruleset,
+#   which needs no download. GITHUB_TOKEN is never passed to tflint (it is unset in native
+#   mode and not forwarded in docker mode), so a plugin cannot read it. With no
+#   internet access, keep to the bundled ruleset or bake plugins into the image.
 #
 # Images are pinned by tag. Pin by digest in production, for example
 #   hashicorp/terraform:1.17.0@sha256:4d1b496a256f2989bccdb04b9104a4ede97234b10fba90259e173e905ec4fb58
@@ -64,6 +69,11 @@ parameters:
   - name: enableTflint
     type: boolean
     default: true
+  # Allow `tflint --init` to download the plugins .tflint.hcl declares. Only
+  # for trusted code: tflint runs what it downloads.
+  - name: tflintPluginInit
+    type: boolean
+    default: false
   # Path on the agent to a PEM bundle, for init against a private mirror.
   - name: caBundle
     type: string
@@ -149,26 +159,46 @@ steps:
           set -euo pipefail
           dir="$(cd "$WORK_DIR" && pwd)"
           plugin_dir="$(mktemp -d "${AGENT_TEMP:-/tmp}/tflint.XXXXXX")"
-          trap 'rm -rf "$plugin_dir"' EXIT
+          cfg_dir="$(mktemp -d "${AGENT_TEMP:-/tmp}/tflint-cfg.XXXXXX")"
+          trap 'rm -rf "$plugin_dir" "$cfg_dir"' EXIT
+          trusted=false
+          if [[ "$PLUGIN_INIT" == "True" || "$PLUGIN_INIT" == "true" ]]; then trusted=true; fi
+          # Untrusted (default): ignore the repository's .tflint.hcl entirely. It
+          # can name plugins to download or a plugin_dir inside the repository,
+          # and tflint runs those plugins. Use a pipeline-owned config with only
+          # the bundled terraform ruleset instead.
+          printf '%s\n' 'plugin "terraform" {' '  enabled = true' '  preset  = "recommended"' '}' >"$cfg_dir/.tflint.hcl"
           case "$MODE" in
             docker)
               lint=(docker run --rm --user "$(id -u):$(id -g)"
-                -e HOME=/tmp -e GITHUB_TOKEN
+                -e HOME=/tmp
                 -e TFLINT_PLUGIN_DIR=/plugins -v "$plugin_dir:/plugins"
+                -v "$cfg_dir:/tflint-cfg:ro"
                 -v "$dir:/data" -w /data
                 "$TFLINT_IMAGE")
+              pipeline_cfg=/tflint-cfg/.tflint.hcl
               ;;
             native)
               export TFLINT_PLUGIN_DIR="$plugin_dir"
+              unset GITHUB_TOKEN
               lint=(tflint --chdir="$dir")
+              pipeline_cfg="$cfg_dir/.tflint.hcl"
               ;;
             *)
               echo "##vso[task.logissue type=error]unknown mode '$MODE' (docker or native)"
               exit 1
               ;;
           esac
-          # Plugins are downloaded only when .tflint.hcl declares one with source =.
-          if [[ -f "$dir/.tflint.hcl" ]] && grep -Eq '^[[:space:]]*source[[:space:]]*=' "$dir/.tflint.hcl"; then
+          if [[ "$trusted" != true ]]; then
+            if [[ -f "$dir/.tflint.hcl" ]]; then
+              echo "##vso[task.logissue type=warning]Ignoring the repository's .tflint.hcl (tflintPluginInit is false): linting with the bundled terraform ruleset only. Set tflintPluginInit: true only for trusted code."
+            fi
+            "${lint[@]}" --config="$pipeline_cfg" --no-color
+            exit 0
+          fi
+          # Trusted code only: use the repository's .tflint.hcl and download the
+          # plugins it declares.
+          if [[ -f "$dir/.tflint.hcl" ]] && grep -Eq 'source[[:space:]]*=' "$dir/.tflint.hcl"; then
             "${lint[@]}" --init
           else
             echo "No plugin with a source in .tflint.hcl: skipping tflint --init"
@@ -179,4 +209,5 @@ steps:
           WORK_DIR: ${{ parameters.directory }}
           MODE: ${{ parameters.mode }}
           TFLINT_IMAGE: ${{ parameters.tflintImage }}
+          PLUGIN_INIT: ${{ parameters.tflintPluginInit }}
           AGENT_TEMP: $(Agent.TempDirectory)
