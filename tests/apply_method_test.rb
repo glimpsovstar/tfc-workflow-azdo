@@ -19,6 +19,10 @@
 #             speculative-run passes showPlanLog to pr-comment includePlanLog.
 #             Defaults: on in apply-run.yml, off in speculative-run.yml (a PR
 #             author could print workspace secrets through the plan text).
+#   cancel    run-cancel.yml follows run-create.yml in every Plan job (on the
+#             configuration version) and run-apply.yml in the pipeline-mode
+#             Apply job (on $(RUN_ID)), with the default canceled() condition;
+#             those jobs set cancelTimeoutInMinutes: 5.
 #
 # Usage: ruby tests/apply_method_test.rb
 # Stdlib only. Compatible with the macOS system Ruby 2.6.
@@ -159,6 +163,43 @@ end
   check("#{label}: pr-comment includePlanLog from showPlanLog", pc && pc['parameters']['includePlanLog'] == '${{ parameters.showPlanLog }}')
   i_pc = index_of(st, 'pr-comment.yml')
   check("#{label}: pr-comment after plan-log", i_pc && i_log && i_pc > i_log)
+end
+
+# Cancel handling: run-cancel right after run-create in every Plan job, on the
+# configuration version, condition left at its default canceled(); in pipeline
+# mode also after run-apply, on $(RUN_ID). Every job holding it sets
+# cancelTimeoutInMinutes: 5.
+CANCEL_DEFAULT = YAML.safe_load(File.read(File.join(Render::ROOT, 'templates/steps/run-cancel.yml')))['parameters']
+                     .find { |p| p['name'] == 'condition' }['default']
+check('run-cancel condition defaults to canceled()', CANCEL_DEFAULT == 'canceled()', CANCEL_DEFAULT.inspect)
+[[APPLY, { 'applyMethod' => 'pipeline', 'environment' => 'e' }], [APPLY, { 'applyMethod' => 'tfe' }], [SPEC, {}]].each do |rel, ov|
+  label = "#{File.basename(rel)} #{ov['applyMethod']}".strip
+  doc = Render.template(rel, ov)
+  job = jobs(doc).find { |j| j['job'] == 'plan' }
+  st = steps(job)
+  i_create = index_of(st, 'run-create.yml')
+  i_cancel = index_of(st, 'run-cancel.yml')
+  check("#{label}: run-cancel right after run-create", i_create && i_cancel == i_create + 1, [i_create, i_cancel].inspect)
+  rc = tpl(st, 'run-cancel.yml')
+  check("#{label}: run-cancel on $(upload.CONFIGURATION_VERSION_ID), no runId, default condition",
+        rc && rc['parameters']['configurationVersionId'] == '$(upload.CONFIGURATION_VERSION_ID)' &&
+          !rc['parameters'].key?('runId') && !rc['parameters'].key?('condition'), rc.inspect)
+  check("#{label}: plan job cancelTimeoutInMinutes 5", job['cancelTimeoutInMinutes'] == 5, job['cancelTimeoutInMinutes'].inspect)
+  next unless rel == APPLY
+
+  apply_job = jobs(doc).find { |j| j['deployment'] == 'apply' }
+  if ov['applyMethod'] == 'tfe'
+    check('tfe: no Apply job, so no run-cancel on a run ID', apply_job.nil?)
+    next
+  end
+  ast = steps(apply_job)
+  i_apply = index_of(ast, 'run-apply.yml')
+  i_acancel = index_of(ast, 'run-cancel.yml')
+  check('pipeline: Apply job run-cancel right after run-apply', i_apply && i_acancel == i_apply + 1, [i_apply, i_acancel].inspect)
+  arc = tpl(ast, 'run-cancel.yml')
+  check('pipeline: Apply run-cancel on runId $(RUN_ID), default condition',
+        arc && arc['parameters']['runId'] == '$(RUN_ID)' && !arc['parameters'].key?('condition'), arc.inspect)
+  check('pipeline: Apply job cancelTimeoutInMinutes 5', apply_job['cancelTimeoutInMinutes'] == 5)
 end
 
 if $failures.positive?

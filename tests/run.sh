@@ -35,6 +35,7 @@ done
 run_check "checker self-tests" bash tests/test_checker.sh
 run_check "pr-comment fake API test" bash tests/pr_comment_test.sh
 run_check "plan-log fake TFE test" bash tests/plan_log_test.sh
+run_check "run-cancel fake TFE test" bash tests/run_cancel_test.sh
 run_check "validate: tflint plugin guard" bash tests/validate_tflint_test.sh
 run_check "examples vs templates (--alias tfc=.)" bash tests/alias_test.sh
 run_check "status sets (gate, Apply condition, pr-comment)" ruby tests/status_sets_test.rb

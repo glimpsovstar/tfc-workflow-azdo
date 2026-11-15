@@ -41,6 +41,7 @@ TEMPLATES = %w[
   templates/steps/plan-output.yml
   templates/steps/plan-log.yml
   templates/steps/run-apply.yml
+  templates/steps/run-cancel.yml
   templates/steps/pr-comment.yml
   templates/steps/validate.yml
 ].freeze
@@ -72,6 +73,14 @@ DESCRIPTIONS = {
   'plan-log.yml:tokenVariable' => 'Name of the secret pipeline variable that holds the token. Mapped through `env:` and given to curl on stdin (`curl -K -`), never on argv.',
   'plan-log.yml:outputFile' => 'File for the trimmed plan log, read by pr-comment.yml.',
   'plan-log.yml:caBundle' => 'Absolute path on the agent to a PEM file for curl `--cacert`, used for the API call and for the log URL when it is on the same host. Replaces the system roots for those calls.',
+  'run-cancel.yml:hostname' => 'HCP Terraform or TFE hostname (`host` or `host:port`). The API calls go to `https://<hostname>/api/v2/`. Required, so the token only goes to a host the caller names.',
+  'run-cancel.yml:organization' => 'Organization name, URL-encoded into the workspace lookup. Needed when `runId` is empty.',
+  'run-cancel.yml:workspace' => 'Workspace name, URL-encoded into the workspace lookup. Needed when `runId` is empty.',
+  'run-cancel.yml:tokenVariable' => 'Name of the secret pipeline variable that holds the token. Mapped through `env:` and given to curl on stdin (`curl -K -`), never on argv. Cancel and discard need apply permission in TFE.',
+  'run-cancel.yml:caBundle' => 'Absolute path on the agent to a PEM file for curl `--cacert`. Replaces the system roots for the API calls.',
+  'run-cancel.yml:configurationVersionId' => 'Configuration version ID (`cv-...`), from upload.yml. With `runId` empty, the newest of the last 20 runs on it is the one to cancel.',
+  'run-cancel.yml:runId' => 'Run ID (`run-...`) when it is known, as in the Apply stage. Empty: find the run by `configurationVersionId`.',
+  'run-cancel.yml:condition' => 'Step condition. The default `canceled()` runs the step only when the job is cancelled.',
   'planLogFile' => 'Trimmed plan log from plan-log.yml. Appended to the comment, collapsed, when it exists.',
   'includePlanLog' => 'Append `planLogFile` to the comment in a collapsed block, capped at 100,000 characters.',
   'enableValidate' => 'Run validate.yml (fmt, init and validate, tflint) before the plan.',

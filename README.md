@@ -91,6 +91,7 @@ templates/
   steps/plan-log.yml              the Terraform plan text from the TFE API, in the log and a trimmed file
   steps/pr-comment.yml            PR thread and PR status through the Azure DevOps REST API
   steps/run-apply.yml             tfci run apply
+  steps/run-cancel.yml            on a cancelled job, cancels or discards the TFE run it started
   steps/validate.yml              terraform fmt, validate and tflint
 examples/                         consumer pipelines and the smoke test
 lab/azdo-agent/                   lab agent as a Kubernetes pod (native mode)

@@ -301,6 +301,26 @@ Outputs (step name from the `name` parameter; the default is shown):
 | `RUN_STATUS` | `$(apply.RUN_STATUS)` | `dependencies.<job>.outputs['apply.RUN_STATUS']` | `stageDependencies.<stage>.<job>.outputs['apply.RUN_STATUS']` |
 | `APPLY_RESULT` | `$(apply.APPLY_RESULT)` | `dependencies.<job>.outputs['apply.APPLY_RESULT']` | `stageDependencies.<stage>.<job>.outputs['apply.APPLY_RESULT']` |
 
+## run-cancel.yml
+
+File: [`templates/steps/run-cancel.yml`](../templates/steps/run-cancel.yml)
+
+Cancel or discard the TFE run this job started, when the Azure DevOps job is cancelled (by a user or by the job timeout).
+
+| Parameter | Type | Default | Required | Description |
+| --- | --- | --- | --- | --- |
+| `hostname` | string |  | yes | HCP Terraform or TFE hostname (`host` or `host:port`). The API calls go to `https://<hostname>/api/v2/`. Required, so the token only goes to a host the caller names. |
+| `organization` | string | `''` | no | Organization name, URL-encoded into the workspace lookup. Needed when `runId` is empty. |
+| `workspace` | string | `''` | no | Workspace name, URL-encoded into the workspace lookup. Needed when `runId` is empty. |
+| `caBundle` | string | `''` | no | Absolute path on the agent to a PEM file for curl `--cacert`. Replaces the system roots for the API calls. |
+| `tokenVariable` | string | `TF_API_TOKEN` | no | Name of the secret pipeline variable that holds the token. Mapped through `env:` and given to curl on stdin (`curl -K -`), never on argv. Cancel and discard need apply permission in TFE. |
+| `configurationVersionId` | string | `''` | no | Configuration version ID (`cv-...`), from upload.yml. With `runId` empty, the newest of the last 20 runs on it is the one to cancel. |
+| `runId` | string | `''` | no | Run ID (`run-...`) when it is known, as in the Apply stage. Empty: find the run by `configurationVersionId`. |
+| `condition` | string | `canceled()` | no | Step condition. The default `canceled()` runs the step only when the job is cancelled. |
+| `displayName` | string | `Cancel the TFE run (job cancelled)` | no | Step display name. |
+
+Outputs: none.
+
 ## pr-comment.yml
 
 File: [`templates/steps/pr-comment.yml`](../templates/steps/pr-comment.yml)

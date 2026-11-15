@@ -1,6 +1,19 @@
 # Changelog
 
-## v2.0.0 (unreleased)
+## v2.0.1 (2026-11-15)
+
+### Added
+
+- `templates/steps/run-cancel.yml`: when an Azure DevOps job is cancelled (by a person or the job timeout), cancels the TFE run it started if the run is planning or applying, or discards it if it waits for a person. It finds the run by the build's configuration version, or uses `runId` when known. API errors are warnings; the step never fails the job.
+- Both pipelines run it after `run-create` in the plan jobs, and `apply-run.yml` runs it after `run-apply` in the Apply job (on `$(RUN_ID)`). Those jobs set `cancelTimeoutInMinutes: 5`.
+- Tests: `tests/run_cancel_test.sh` (fake TFE over HTTPS), and wiring checks in `tests/apply_method_test.rb`.
+- Lab-tested (`docs/PROOF.md` rows 14 and 16): a real Azure DevOps cancel fires the step and it finds the run; a plan-permission token is refused cancel and discard (HTTP 404), so in Plan jobs the step logs which runs are harmless and which to discard in TFE; an apply-permission token cancels and discards (HTTP 202).
+
+### Fixed
+
+- A cancelled job no longer leaves its TFE run going without a word. In a Plan job the step uses the plan token, and TFE needs apply permission to cancel or discard, so there it may log a warning and leave the run for a person ([docs/troubleshooting.md](docs/troubleshooting.md#job-cancelled-what-happens-to-the-tfe-run)).
+
+## v2.0.0 (2026-11-15)
 
 A rebuild after a full review on 2026-11-15. v1 pipelines do not carry over: consumers move to the `extends` templates. See [README.md](README.md#quick-start).
 
