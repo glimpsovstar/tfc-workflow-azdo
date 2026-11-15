@@ -42,6 +42,7 @@ Extends template for pull request validation builds: a speculative (plan-only) r
 | `caBundle` | string | `''` | no | Absolute path on the agent to a PEM file with the private CA for TFE. Added to the system roots through `SSL_CERT_DIR`. |
 | `variableGroup` | string | `tfc-plan` | no | Variable group with the plan token. |
 | `tokenVariable` | string | `TF_API_TOKEN` | no | Name of the secret pipeline variable that holds the token. Mapped to `TF_API_TOKEN` through `env:`. |
+| `maxTimeout` | string | `1h` | no | Set as `TF_MAX_TIMEOUT`: how long tfci waits for the run. |
 | `enableValidate` | boolean | `true` | no | Run validate.yml (fmt, init and validate, tflint) before the plan. |
 | `enableTflint` | boolean | `true` | no | Run tflint in validate.yml. |
 | `terraformImage` | string | `hashicorp/terraform:1.17.0` | no | Terraform image for docker mode. |
@@ -87,6 +88,7 @@ Extends template for the main branch: plan, approval, apply.
 | `planVariableGroup` | string | `tfc-plan` | no | Variable group for the Plan stage, with the plan token. |
 | `applyVariableGroup` | string | `tfc-apply` | no | Variable group for the Apply stage, with the apply token. |
 | `tokenVariable` | string | `TF_API_TOKEN` | no | Name of the secret pipeline variable that holds the token. Mapped to `TF_API_TOKEN` through `env:`. |
+| `maxTimeout` | string | `1h` | no | Set as `TF_MAX_TIMEOUT`: how long tfci waits for the run. |
 | `environment` | string |  | yes | Azure DevOps environment for the Apply deployment job. Give it an approval and a branch control check. |
 | `enableValidate` | boolean | `false` | no | Run validate.yml (fmt, init and validate, tflint) before the plan. |
 | `enableTflint` | boolean | `true` | no | Run tflint in validate.yml. |

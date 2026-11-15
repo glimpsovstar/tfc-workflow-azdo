@@ -50,9 +50,9 @@
 # it runs in $(Agent.TempDirectory).
 #   https://learn.microsoft.com/en-us/azure/devops/pipelines/process/deployment-jobs?view=azure-devops
 #
-# Step templates are referenced with a leading / (repository root). Assumption,
-# to confirm in the first server-side compile: inside a template loaded with
-# @alias, a / path resolves in that template's repository.
+# Step templates are referenced by relative path (../steps/...), which resolves
+# from this file inside the template repository when consumed with @alias.
+# To confirm in the first server-side compile.
 parameters:
   - name: workspace
     type: string
@@ -91,6 +91,9 @@ parameters:
   - name: tokenVariable
     type: string
     default: TF_API_TOKEN
+  - name: maxTimeout
+    type: string
+    default: 1h
   # Azure DevOps environment with an approval and a branch control check.
   - name: environment
     type: string
@@ -148,6 +151,7 @@ stages:
               organization: ${{ parameters.organization }}
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
+              maxTimeout: ${{ parameters.maxTimeout }}
 
           - template: ../steps/run-create.yml
             parameters:
@@ -160,6 +164,7 @@ stages:
               organization: ${{ parameters.organization }}
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
+              maxTimeout: ${{ parameters.maxTimeout }}
 
           - template: ../steps/plan-output.yml
             parameters:
@@ -175,6 +180,7 @@ stages:
               organization: ${{ parameters.organization }}
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
+              maxTimeout: ${{ parameters.maxTimeout }}
 
           # Says what the Apply stage will do. Keep the status list in step
           # with the Apply stage condition below.
@@ -235,3 +241,4 @@ stages:
                     organization: ${{ parameters.organization }}
                     caBundle: ${{ parameters.caBundle }}
                     tokenVariable: ${{ parameters.tokenVariable }}
+                    maxTimeout: ${{ parameters.maxTimeout }}

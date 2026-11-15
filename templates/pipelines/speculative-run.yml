@@ -1,9 +1,10 @@
 # Extends template for pull request validation builds: a speculative
 # (plan-only) run on this PR's own code, posted back to the PR.
 #
-# One stage, one job:
-#   checkout, validate (optional), upload (speculative), run-create (plan
-#   only, on that configuration version), plan-output, pr-comment.
+# One stage, two jobs:
+#   validate (optional, no variable group: it runs untrusted PR code), then
+#   plan: checkout, upload (speculative), run-create (plan only, on that
+#   configuration version), plan-output, pr-comment.
 #
 # The run is pinned to the configuration version this build uploaded
 # ($(upload.CONFIGURATION_VERSION_ID)), so two PRs at once each see their own
@@ -23,9 +24,9 @@
 # TFE team token with plan permission only. The build service identity needs
 # "Contribute to pull requests" on the repository for the PR comment.
 #
-# Step templates are referenced with a leading / (repository root). Assumption,
-# to confirm in the first server-side compile: inside a template loaded with
-# @alias, a / path resolves in that template's repository.
+# Step templates are referenced by relative path (../steps/...), which resolves
+# from this file inside the template repository when consumed with @alias.
+# To confirm in the first server-side compile.
 parameters:
   - name: workspace
     type: string
@@ -60,6 +61,9 @@ parameters:
   - name: tokenVariable
     type: string
     default: TF_API_TOKEN
+  - name: maxTimeout
+    type: string
+    default: 1h
   - name: enableValidate
     type: boolean
     default: true
@@ -127,6 +131,7 @@ stages:
               organization: ${{ parameters.organization }}
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
+              maxTimeout: ${{ parameters.maxTimeout }}
 
           - template: ../steps/run-create.yml
             parameters:
@@ -139,6 +144,7 @@ stages:
               organization: ${{ parameters.organization }}
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
+              maxTimeout: ${{ parameters.maxTimeout }}
 
           - template: ../steps/plan-output.yml
             parameters:
@@ -154,6 +160,7 @@ stages:
               organization: ${{ parameters.organization }}
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
+              maxTimeout: ${{ parameters.maxTimeout }}
 
           # Default condition succeededOrFailed(): posts after a failed plan too.
           - template: ../steps/pr-comment.yml
