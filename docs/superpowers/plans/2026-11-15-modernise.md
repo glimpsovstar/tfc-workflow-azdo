@@ -44,7 +44,7 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 - Produces: `tests/run.sh` exits 0 only when every check passes; `check_templates.py <dir>` prints `file:line rule message` per violation.
 
 - [ ] Write `check_templates.py` rules: yaml-parse, param-crosscheck, no-macro-in-bool-param, no-template-if-in-script, no-parent-template-path, no-latest-image, no-secret-macro-in-script, strict-bash, tfci-command-exists (reads the manifest), no-user-macro-in-script (`System.PullRequest.*`, `Build.SourceBranch*`, `Build.RequestedFor`).
-- [ ] Generate `tfci-v1.4.0-commands.txt` from tfci v1.4.0 source (`cli.go` commands, each command's `f.*Var` flags, plus global `--json --hostname --organization --token`). Record the source URL and tag at the top.
+- [ ] Generate `tfci-v1.4.0-commands.txt` and `tfci-v1.5.0-commands.txt` from tfci source at both tags (`cli.go` commands, each command's `f.*Var` flags, plus global `--json --hostname --organization --token`). Record the source URL and tag at the top. A test asserts the two manifests list the same commands and flags (verified 2026-11-15: v1.5.0 changes only Go and dependencies), so moving the default image to v1.5.0 is a one-line change.
 - [ ] Run against the current `tasks/` and `pipeline-templates/`: expect failures for `--format=json`, `workspace list`, `:latest`, `$(TF_API_TOKEN)` in scripts, `${{ if` in scripts, missing `set -euo pipefail`. Save the output in the commit message body.
 - [ ] `tests/run.sh`: python check, shellcheck on extracted scripts, `terraform fmt -check`, `validate`, `tflint` on the fixture.
 - [ ] Commit: `Test harness that catches the review's defect classes; clean up generator script and sample`.
