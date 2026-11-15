@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.0.1 (unreleased)
+## v2.0.1 (2026-11-15)
 
 ### Added
 
@@ -13,7 +13,7 @@
 
 - A cancelled job no longer leaves its TFE run going without a word. In a Plan job the step uses the plan token, and TFE needs apply permission to cancel or discard, so there it may log a warning and leave the run for a person ([docs/troubleshooting.md](docs/troubleshooting.md#job-cancelled-what-happens-to-the-tfe-run)).
 
-## v2.0.0 (unreleased)
+## v2.0.0 (2026-11-15)
 
 A rebuild after a full review on 2026-11-15. v1 pipelines do not carry over: consumers move to the `extends` templates. See [README.md](README.md#quick-start).
 
