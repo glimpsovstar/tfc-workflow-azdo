@@ -43,9 +43,8 @@
 # (`curl -q -K -`), so the token is never on a command line and never printed.
 # It is whatever token the job holds: the plan token in a Plan job, the apply
 # token in the Apply job. TFE says cancel and discard need permission to apply
-# runs, so a plan-only token is expected to get an error here (a warning, exit
-# 0). Assumption, to confirm in the lab: what a plan-permission team token gets
-# back for cancel and discard, including on its own speculative run.
+# runs, so a plan-only token gets HTTP 404 here (confirmed on TFE 2.1.1, even
+# on its own speculative run); the step logs a warning and exits 0.
 #
 # CA: as in plan-log.yml. caBundle (absolute path to a PEM file) is passed to
 # curl as --cacert, which REPLACES the system roots. Empty: system roots.
@@ -101,7 +100,11 @@ steps:
 
       # Never fail the cancelled job: warn and stop.
       give_up() {
-        echo "##vso[task.logissue type=warning]run-cancel: $1"
+        # Keep the message to safe characters so no value can end the logging
+        # command early or add one.
+        local msg
+        msg="$(printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9 ._:/(),;=-' ' ')"
+        echo "##vso[task.logissue type=warning]run-cancel: $msg"
         exit 0
       }
       # A value for curl's config file: in double quotes, \ and " escaped.
@@ -226,7 +229,7 @@ steps:
       case "$code" in
         200 | 202) echo "TFE accepted the $action request for run $run_id." ;;
         409) echo "TFE refused to $action run $run_id (HTTP 409): it moved on, check it in TFE." ;;
-        403 | 404) give_up "POST $action for run $run_id returned HTTP $code: the token cannot $action this run (TFE needs apply permission). Cancel or discard it in TFE." ;;
+        403 | 404) give_up "POST $action for run $run_id returned HTTP $code: the token cannot $action this run (TFE needs apply permission; a plan-only token is refused). A speculative or saved-plan run is harmless and needs no action; a run waiting for confirmation holds the workspace queue, so discard it in TFE." ;;
         *) give_up "POST $action for run $run_id returned HTTP $code. Cancel or discard it in TFE." ;;
       esac
     displayName: ${{ parameters.displayName }}

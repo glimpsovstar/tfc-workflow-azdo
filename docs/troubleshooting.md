@@ -78,7 +78,10 @@ Cancelling an apply interrupts Terraform part way, so some changes may already b
 
 **Warnings you may see.**
 
-- `the token cannot cancel this run (TFE needs apply permission)`, HTTP 403 or 404. TFE documents that cancel and discard need permission to apply runs. A Plan job holds the plan token, which has plan permission only, so in a Plan job this warning is expected. Cancel or discard the run in TFE by hand (the warning names the run ID). The Apply job holds the apply token and can cancel. **Assumption, to confirm in the lab:** that a plan-permission team token is refused cancel and discard, including on a speculative run it queued itself.
+- `the token cannot cancel this run (TFE needs apply permission`, HTTP 403 or 404. TFE documents that cancel and discard need permission to apply runs. A Plan job holds the plan token, which has plan permission only, so in a Plan job this warning is expected. The Apply job holds the apply token and can cancel. Confirmed in the lab on TFE 2.1.1 ([PROOF.md](PROOF.md) row 14): a plan-permission team token gets HTTP 404 for both cancel and discard, even on a run it queued itself; an apply-permission token cancels and discards (HTTP 202). What a Plan-job warning means for the run left behind (note: on Microsoft-hosted agents, a job that hits the agent's own time limit is terminated, not cancelled, so cancel steps do not run; the templates target self-hosted agents):
+  - **PR (speculative) run:** plan-only, it finishes on its own and changes nothing. No action needed.
+  - **Main, `applyMethod: pipeline`:** a saved plan; it does not lock the workspace. Discard it in TFE if you want a tidy run list.
+  - **Main, `applyMethod: tfe`:** a normal run waiting for confirmation, which holds the workspace's run queue. Discard it in TFE.
 - `HTTP 409`: the run moved on between the read and the cancel (for example it finished). Check it in TFE.
 - `failed (curl exit 28)`: an API call took more than 20 seconds. Check the run in TFE.
 - `configurationVersionId is not a configuration version ID` or `runId is not a run ID`: a wiring mistake in a pipeline that calls the step itself. Nothing is sent.

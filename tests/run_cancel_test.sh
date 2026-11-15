@@ -52,7 +52,7 @@ fi
 script="${scripts[0]}"
 
 # 2. Fake TFE over HTTPS with a test CA. MODE file: cancel, discard, finished,
-# nomatch, ws500, post500.
+# nomatch, ws500, post500, post404.
 cat >"$work/server.rb" <<'RUBY'
 require 'webrick'
 require 'webrick/https'
@@ -127,6 +127,9 @@ handler = lambda do |req, res|
     if mode == 'post500'
       res.status = 500
       res.body = '{"errors":[{"status":"500"}]}'
+    elsif mode == 'post404'
+      res.status = 404
+      res.body = '{"errors":[{"status":"404","title":"not found"}]}'
     else
       res.status = 202
       res.body = ''
@@ -265,6 +268,13 @@ if [[ $rc -eq 0 && "$out" == *"##vso[task.logissue type=warning]run-cancel:"*"HT
   pass "f: the cancel POST returns 500: warning with HTTP 500, exit 0"
 else
   bad "f2: rc=$rc out: $out"
+fi
+
+run_case f3 post404 cv-target
+if [[ $rc -eq 0 && "$out" == *"##vso[task.logissue type=warning]run-cancel:"*"HTTP 404"*"needs apply permission"* ]]; then
+  pass "f: the cancel POST returns 404 (plan-only token): warning naming apply permission, exit 0"
+else
+  bad "f3: rc=$rc out: $out"
 fi
 
 # (h)
