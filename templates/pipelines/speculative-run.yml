@@ -11,9 +11,9 @@
 #
 # A failed plan still reports: the run-create output step and pr-comment run on
 # succeededOrFailed(), so the PR gets the comment and a failed status, then the
-# job fails. plan-output has no condition parameter, so it only runs when the
-# plan succeeded; after a failed plan pr-comment posts the run status and link
-# without the counts.
+# job fails. plan-output runs whenever the run produced a plan ID (for example
+# a plan that finished but failed a hard-mandatory policy), so the comment still
+# carries the add, change and destroy counts.
 #
 # Azure Repos runs this for a PR through branch policy build validation, not
 # through a YAML `pr:` trigger. See examples/azure-pipelines.pr.yml.
@@ -96,7 +96,7 @@ stages:
           - checkout: self
 
           - ${{ if eq(parameters.enableValidate, true) }}:
-              - template: /templates/steps/validate.yml
+              - template: ../steps/validate.yml
                 parameters:
                   directory: $(System.DefaultWorkingDirectory)/${{ parameters.directory }}
                   mode: ${{ parameters.mode }}
@@ -106,7 +106,7 @@ stages:
                   caBundle: ${{ parameters.validateCaBundle }}
                   cliConfigFile: ${{ parameters.cliConfigFile }}
 
-          - template: /templates/steps/upload.yml
+          - template: ../steps/upload.yml
             parameters:
               workspace: ${{ parameters.workspace }}
               directory: ${{ parameters.directory }}
@@ -118,7 +118,7 @@ stages:
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
 
-          - template: /templates/steps/run-create.yml
+          - template: ../steps/run-create.yml
             parameters:
               workspace: ${{ parameters.workspace }}
               configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
@@ -130,8 +130,9 @@ stages:
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
 
-          - template: /templates/steps/plan-output.yml
+          - template: ../steps/plan-output.yml
             parameters:
+              condition: and(succeededOrFailed(), ne(variables['run.PLAN_ID'], ''))
               planId: $(run.PLAN_ID)
               workspace: ${{ parameters.workspace }}
               runLink: $(run.RUN_LINK)
@@ -145,7 +146,7 @@ stages:
               tokenVariable: ${{ parameters.tokenVariable }}
 
           # Default condition succeededOrFailed(): posts after a failed plan too.
-          - template: /templates/steps/pr-comment.yml
+          - template: ../steps/pr-comment.yml
             parameters:
               workspace: ${{ parameters.workspace }}
               runLink: $(run.RUN_LINK)

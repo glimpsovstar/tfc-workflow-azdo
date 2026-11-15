@@ -424,8 +424,13 @@ module CheckTemplates
       line = tnode.start_line + 1
       return if CheckTemplates.expr?(tpath)
 
-      if tpath.include?('../')
-        add(path, line, 'no-parent-template-path', "template path '#{tpath}' uses ../; reference templates from the repo root or a repository resource")
+      if tpath.include?('../') && !tpath.include?('@')
+        resolved = File.expand_path(tpath, File.dirname(File.expand_path(path)))
+        root = File.expand_path(REPO_ROOT)
+        unless resolved == root || resolved.start_with?(root + File::SEPARATOR)
+          add(path, line, 'no-parent-template-path', "template path '#{tpath}' resolves outside the repository; use a path inside the repo or a repository resource")
+          return
+        end
       end
       check_tfci_params(path, ref) if File.basename(tpath.sub(/@.*\z/, '')) == 'tfci.yml'
       target = if tpath.include?('@') # repository resource reference

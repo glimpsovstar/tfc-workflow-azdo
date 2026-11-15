@@ -1,5 +1,6 @@
-# A template path that climbs with ../ breaks when consumed from another repo.
+# A template path that climbs out of the repository breaks when consumed from another repo.
+# Relative paths inside the repo (e.g. ../steps/x.yml from templates/pipelines/) are fine.
 steps:
-  - template: templates/../templates/steps.yml
+  - template: ../../../../outside/steps.yml
     parameters:
       name: demo

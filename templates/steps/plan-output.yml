@@ -66,6 +66,10 @@ parameters:
     type: string
     default: 1h
 
+  - name: condition
+    type: string
+    default: succeeded()
+
 steps:
   - bash: |
       set -euo pipefail
@@ -74,12 +78,14 @@ steps:
         exit 1
       fi
     name: ${{ parameters.name }}_check
+    condition: ${{ parameters.condition }}
     displayName: ${{ parameters.displayName }} (check input)
     env:
       PLAN_ID: ${{ parameters.planId }}
 
   - template: tfci.yml
     parameters:
+      condition: ${{ parameters.condition }}
       name: ${{ parameters.name }}_tfci
       displayName: ${{ parameters.displayName }}
       command: plan output
@@ -136,6 +142,7 @@ steps:
       echo "##vso[task.uploadsummary]$SUMMARY_FILE"
     name: ${{ parameters.name }}
     displayName: ${{ parameters.displayName }} (write summary)
+    condition: ${{ parameters.condition }}
     env:
       TFCI_OUT: $(Agent.TempDirectory)/tfci-${{ parameters.name }}.json
       SUMMARY_FILE: ${{ parameters.summaryFile }}

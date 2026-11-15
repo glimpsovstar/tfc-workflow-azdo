@@ -127,7 +127,7 @@ stages:
           - checkout: self
 
           - ${{ if eq(parameters.enableValidate, true) }}:
-              - template: /templates/steps/validate.yml
+              - template: ../steps/validate.yml
                 parameters:
                   directory: $(System.DefaultWorkingDirectory)/${{ parameters.directory }}
                   mode: ${{ parameters.mode }}
@@ -137,7 +137,7 @@ stages:
                   caBundle: ${{ parameters.validateCaBundle }}
                   cliConfigFile: ${{ parameters.cliConfigFile }}
 
-          - template: /templates/steps/upload.yml
+          - template: ../steps/upload.yml
             parameters:
               workspace: ${{ parameters.workspace }}
               directory: ${{ parameters.directory }}
@@ -149,7 +149,7 @@ stages:
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
 
-          - template: /templates/steps/run-create.yml
+          - template: ../steps/run-create.yml
             parameters:
               workspace: ${{ parameters.workspace }}
               configurationVersionId: $(upload.CONFIGURATION_VERSION_ID)
@@ -161,8 +161,9 @@ stages:
               caBundle: ${{ parameters.caBundle }}
               tokenVariable: ${{ parameters.tokenVariable }}
 
-          - template: /templates/steps/plan-output.yml
+          - template: ../steps/plan-output.yml
             parameters:
+              condition: and(succeededOrFailed(), ne(variables['run.PLAN_ID'], ''))
               planId: $(run.PLAN_ID)
               workspace: ${{ parameters.workspace }}
               runLink: $(run.RUN_LINK)
@@ -224,7 +225,7 @@ stages:
               steps:
                 # No artifacts to download; deployment jobs do not check out.
                 - download: none
-                - template: /templates/steps/run-apply.yml
+                - template: ../steps/run-apply.yml
                   parameters:
                     runId: $(RUN_ID)
                     workingDirectory: $(Agent.TempDirectory)

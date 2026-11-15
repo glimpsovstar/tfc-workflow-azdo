@@ -79,6 +79,10 @@ parameters:
     type: string
     default: ''
 
+  - name: condition
+    type: string
+    default: succeeded()
+
 steps:
   - bash: |
       set -euo pipefail
@@ -164,6 +168,7 @@ steps:
       exit "$rc"
     name: ${{ parameters.name }}
     displayName: ${{ parameters.displayName }}
+    condition: ${{ parameters.condition }}
     env:
       TF_API_TOKEN: $(${{ parameters.tokenVariable }})
       TF_HOSTNAME: ${{ parameters.hostname }}
