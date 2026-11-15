@@ -135,6 +135,7 @@ stages:
                   terraformImage: ${{ parameters.terraformImage }}
                   tflintImage: ${{ parameters.tflintImage }}
                   enableTflint: ${{ parameters.enableTflint }}
+                  tflintPluginInit: false  # always: PR code is untrusted, so tflint never uses the PR's .tflint.hcl
                   caBundle: ${{ parameters.validateCaBundle }}
                   cliConfigFile: ${{ parameters.cliConfigFile }}
 

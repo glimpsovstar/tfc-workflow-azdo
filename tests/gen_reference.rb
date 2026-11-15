@@ -76,6 +76,7 @@ DESCRIPTIONS = {
   'includePlanLog' => 'Append `planLogFile` to the comment in a collapsed block, capped at 100,000 characters.',
   'enableValidate' => 'Run validate.yml (fmt, init and validate, tflint) before the plan.',
   'enableTflint' => 'Run tflint in validate.yml.',
+  'tflintPluginInit' => 'Use the repository `.tflint.hcl` and let `tflint --init` download the plugins it declares. Off by default: tflint then ignores the repository config and uses only the bundled terraform ruleset, because on a PR the config comes from the PR author and tflint runs its plugins. Turn on only for trusted code.',
   'terraformImage' => 'Terraform image for docker mode.',
   'tflintImage' => 'tflint image for docker mode.',
   'cliConfigFile' => 'Path on the agent to a Terraform CLI config file, set as `TF_CLI_CONFIG_FILE` (for a provider mirror).',

@@ -100,6 +100,7 @@ Extends template for the main branch: plan, approval, apply.
 | `showPlanLog` | boolean | `true` | no | Print the Terraform plan text in the job log (plan-log.yml). In speculative-run.yml it also adds a trimmed copy to the PR comment. The plan shows values not marked sensitive. |
 | `enableValidate` | boolean | `false` | no | Run validate.yml (fmt, init and validate, tflint) before the plan. |
 | `enableTflint` | boolean | `true` | no | Run tflint in validate.yml. |
+| `tflintPluginInit` | boolean | `false` | no | Use the repository `.tflint.hcl` and let `tflint --init` download the plugins it declares. Off by default: tflint then ignores the repository config and uses only the bundled terraform ruleset, because on a PR the config comes from the PR author and tflint runs its plugins. Turn on only for trusted code. |
 | `terraformImage` | string | `hashicorp/terraform:1.17.0` | no | Terraform image for docker mode. |
 | `tflintImage` | string | `ghcr.io/terraform-linters/tflint:v0.66.0` | no | tflint image for docker mode. |
 | `cliConfigFile` | string | `''` | no | Path on the agent to a Terraform CLI config file, set as `TF_CLI_CONFIG_FILE` (for a provider mirror). |
@@ -337,6 +338,7 @@ Validate step template: terraform fmt -check, init -backend=false and validate, 
 | `terraformImage` | string | `hashicorp/terraform:1.17.0` | no | Terraform image for docker mode. |
 | `tflintImage` | string | `ghcr.io/terraform-linters/tflint:v0.66.0` | no | tflint image for docker mode. |
 | `enableTflint` | boolean | `true` | no | Run tflint in validate.yml. |
+| `tflintPluginInit` | boolean | `false` | no | Use the repository `.tflint.hcl` and let `tflint --init` download the plugins it declares. Off by default: tflint then ignores the repository config and uses only the bundled terraform ruleset, because on a PR the config comes from the PR author and tflint runs its plugins. Turn on only for trusted code. |
 | `caBundle` | string | `''` | no | Absolute path on the agent to a PEM bundle for `terraform init`. Set as `SSL_CERT_FILE`, which replaces the system roots. |
 | `cliConfigFile` | string | `''` | no | Path on the agent to a Terraform CLI config file, set as `TF_CLI_CONFIG_FILE` (for a provider mirror). |
 

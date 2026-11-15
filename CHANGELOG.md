@@ -66,6 +66,7 @@ A rebuild after a full review on 2026-11-15. v1 pipelines do not carry over: con
 
 ### Security
 
+- tflint no longer trusts the repository's `.tflint.hcl` by default: with `tflintPluginInit: false` (the default) it lints with a pipeline-owned config holding only the bundled terraform ruleset, so a PR cannot make tflint download or run a plugin (including through `plugin_dir`). `GITHUB_TOKEN` is never passed to tflint. Set `tflintPluginInit: true` only for trusted code.
 - Plan and apply use separate team tokens. The apply token's variable group is limited to the main pipeline, with an approval and a branch control check on `refs/heads/main`.
 - PR validation runs in a job with no variable group, so untrusted PR code never shares a job with a token.
 - Secrets reach scripts only through `env:`. Docker gets the token by name (`-e TF_API_TOKEN`), never on the command line.
