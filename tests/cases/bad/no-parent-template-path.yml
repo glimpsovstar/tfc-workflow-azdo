@@ -1,0 +1,5 @@
+# A template path that climbs with ../ breaks when consumed from another repo.
+steps:
+  - template: templates/../templates/steps.yml
+    parameters:
+      name: demo

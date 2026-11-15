@@ -1,0 +1,4 @@
+# Broken YAML: the flow sequence is never closed.
+steps:
+  - script: [echo, "unterminated"
+    displayName: Broken

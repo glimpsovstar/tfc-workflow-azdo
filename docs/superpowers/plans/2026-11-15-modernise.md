@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - tfci default image `hashicorp/tfci:v1.4.0`; image is always a parameter, never `:latest`.
-- Only these tfci commands: `upload`, `run create|apply|show|discard|cancel`, `plan output`, `workspace output list`. Global flags go before the command (`tfci --json run create ...`).
+- Only these tfci commands: `upload`, `run create|apply|show|discard|cancel`, `plan output`, `workspace output list`. Global flags (`--hostname`, `--organization`, `--token`) go before the command; `--json` is a per-command flag and goes after it (`tfci run create --json ...`). Verified in tfci v1.4.0 `cli.go` and `internal/command/meta.go:70`.
 - Every bash script starts with `set -euo pipefail`.
 - Secrets only via `env:`; `docker run -e NAME` with the name only. No `$(SECRET)` in a script body, no `set -x`.
 - User-controlled values (branch, PR title, requester) only via `env:` and quoted shell variables.
@@ -38,12 +38,12 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 - Delete: `update-best-practices.sh`
 - Move: `terraform/` to `tests/fixtures/random/` (drop `timestamp()` from tags, fix `.tflint.hcl`, `required_version >= 1.6`, commit `.terraform.lock.hcl`)
 - Modify: `.gitignore` (stop ignoring the lock file; add `.terraformrc`, `terraform.rc`, `credentials.tfrc.json`, `.env`, `*.tfplan`)
-- Create: `tests/check_templates.py`, `tests/tfci-v1.4.0-commands.txt`, `tests/run.sh`, `progress.md`
+- Create: `tests/check_templates.rb`, `tests/tfci-v1.4.0-commands.txt`, `tests/run.sh`, `progress.md`
 
 **Interfaces:**
-- Produces: `tests/run.sh` exits 0 only when every check passes; `check_templates.py <dir>` prints `file:line rule message` per violation.
+- Produces: `tests/run.sh` exits 0 only when every check passes; `check_templates.rb <dir>` prints `file:line rule message` per violation.
 
-- [ ] Write `check_templates.py` rules: yaml-parse, param-crosscheck, no-macro-in-bool-param, no-template-if-in-script, no-parent-template-path, no-latest-image, no-secret-macro-in-script, strict-bash, tfci-command-exists (reads the manifest), no-user-macro-in-script (`System.PullRequest.*`, `Build.SourceBranch*`, `Build.RequestedFor`).
+- [ ] Write `check_templates.rb` rules: yaml-parse, param-crosscheck, no-macro-in-bool-param, no-template-if-in-script, no-parent-template-path, no-latest-image, no-secret-macro-in-script, strict-bash, tfci-command-exists (reads the manifest), no-user-macro-in-script (`System.PullRequest.*`, `Build.SourceBranch*`, `Build.RequestedFor`).
 - [ ] Generate `tfci-v1.4.0-commands.txt` and `tfci-v1.5.0-commands.txt` from tfci source at both tags (`cli.go` commands, each command's `f.*Var` flags, plus global `--json --hostname --organization --token`). Record the source URL and tag at the top. A test asserts the two manifests list the same commands and flags (verified 2026-11-15: v1.5.0 changes only Go and dependencies), so moving the default image to v1.5.0 is a one-line change.
 - [ ] Run against the current `tasks/` and `pipeline-templates/`: expect failures for `--format=json`, `workspace list`, `:latest`, `$(TF_API_TOKEN)` in scripts, `${{ if` in scripts, missing `set -euo pipefail`. Save the output in the commit message body.
 - [ ] `tests/run.sh`: python check, shellcheck on extracted scripts, `terraform fmt -check`, `validate`, `tflint` on the fixture.
@@ -98,7 +98,7 @@ Each is pinned by a test or an end-to-end check in the task that owns it.
 
 **Files:** Rewrite `README.md`, `docs/{setup,tfe-private-network,internal-registry,security,reference,troubleshooting}.md`; delete `docs/migration-guide.md`, old `docs/README.md`, `examples/README.md`; create `CHANGELOG.md` (v2.0.0).
 
-- [ ] Every parameter in `reference.md` generated from or checked against the templates by `check_templates.py --docs`.
+- [ ] Every parameter in `reference.md` generated from or checked against the templates by `check_templates.rb --docs`.
 - [ ] Setup covers: branch-policy build validation, two variable groups with permissions and branch control, team tokens, build service "Contribute to pull requests", environment approval, workspace auto-apply off.
 - [ ] Commit.
 

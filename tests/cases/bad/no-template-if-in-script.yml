@@ -1,0 +1,14 @@
+# ${{ if }} inside a script string is not evaluated: bash sees it as text.
+parameters:
+  - name: planOnly
+    type: boolean
+    default: true
+
+steps:
+  - script: |
+      set -euo pipefail
+      FLAG=""
+      ${{ if eq(parameters.planOnly, true) }}:
+      FLAG="--plan-only=true"
+      echo "$FLAG"
+    displayName: Template if in script

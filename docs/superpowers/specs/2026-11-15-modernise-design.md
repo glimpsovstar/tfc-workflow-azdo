@@ -84,7 +84,7 @@ lab/
   azdo-agent/               Kubernetes manifests: Azure DevOps agent pod with tfci copied in
 tests/
   fixtures/random/          the old terraform/ sample, fixed
-  check_templates.py        static checks over all YAML
+  check_templates.rb        static checks over all YAML
   tfci-v1.4.0-commands.txt  real tfci commands and flags, from source
   run.sh                    runs every local check
 docs/  setup, tfe-private-network, internal-registry, security, reference, troubleshooting

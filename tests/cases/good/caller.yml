@@ -1,0 +1,8 @@
+# Consumer pipeline: extends the template and passes compile-time values only.
+trigger: none
+
+extends:
+  template: templates/pipeline.yml
+  parameters:
+    workspace: demo-workspace
+    planOnly: false

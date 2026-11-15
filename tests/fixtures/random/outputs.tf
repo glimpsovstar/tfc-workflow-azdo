@@ -51,7 +51,7 @@ output "test_message" {
 output "validation_summary" {
   description = "Summary of validation checks performed"
   value = {
-    terraform_version   = ">= 1.0"
+    terraform_version   = ">= 1.6"
     providers_validated = "✅"
     variables_validated = "✅"
     outputs_defined     = "✅"

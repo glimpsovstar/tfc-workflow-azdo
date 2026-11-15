@@ -2,7 +2,7 @@
 # Following Terraform best practices
 
 terraform {
-  required_version = ">= 1.0"
+  required_version = ">= 1.6"
 
   required_providers {
     random = {
@@ -54,7 +54,6 @@ locals {
     Environment = var.environment
     Project     = var.project_name
     Workspace   = terraform.workspace
-    Timestamp   = timestamp()
   })
 
   # Computed values

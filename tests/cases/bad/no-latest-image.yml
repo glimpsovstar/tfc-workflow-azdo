@@ -1,0 +1,6 @@
+# An image with no tag resolves to :latest.
+steps:
+  - script: |
+      set -euo pipefail
+      docker run --rm hello-world
+    displayName: Untagged image

@@ -1,0 +1,6 @@
+# A PR author controls the branch name: expanding it into bash is injection.
+steps:
+  - script: |
+      set -euo pipefail
+      echo "Source branch: $(System.PullRequest.SourceBranch)"
+    displayName: User macro in script
