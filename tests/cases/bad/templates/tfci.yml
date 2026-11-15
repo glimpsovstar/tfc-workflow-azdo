@@ -1,0 +1,22 @@
+# Target for tests/cases/bad/tfci-param-command.yml. Its filename is what
+# triggers the tfci-param-command rule; the body only declares parameters.
+parameters:
+  - name: name
+    type: string
+  - name: command
+    type: string
+  - name: args
+    type: string
+    default: ''
+  - name: textArgs
+    type: object
+    default: {}
+
+steps:
+  - bash: |
+      set -euo pipefail
+      echo "tfci $TFCI_COMMAND"
+    name: ${{ parameters.name }}
+    displayName: tfci stub
+    env:
+      TFCI_COMMAND: ${{ parameters.command }}

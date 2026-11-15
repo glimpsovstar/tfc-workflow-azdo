@@ -421,6 +421,7 @@ module CheckTemplates
       if tpath.include?('../')
         add(path, line, 'no-parent-template-path', "template path '#{tpath}' uses ../; reference templates from the repo root or a repository resource")
       end
+      check_tfci_params(path, ref) if File.basename(tpath.sub(/@.*\z/, '')) == 'tfci.yml'
       return if tpath.include?('@') # repository resource reference
 
       target = if tpath.start_with?('/')
@@ -467,6 +468,69 @@ module CheckTemplates
 
         add(path, line, 'param-crosscheck', "required parameter '#{name}' of '#{tpath}' is not passed")
       end
+    end
+
+    # ----- calls to the tfci wrapper template (tfci.yml) -----
+
+    PLACEHOLDER_RE = /\$\{\{.*?\}\}|\$\([^)]*\)/.freeze
+    TEXT_ARG_KEY_RE = /\A[A-Za-z_]+\z/.freeze
+
+    # The wrapper runs `tfci <command> --json <args> <textArgs>`. Check that the
+    # command exists and that every flag in args and every textArgs key is a
+    # flag of that command. ${{ }} and $() placeholders in args are ignored.
+    def check_tfci_params(path, ref)
+      params = CheckTemplates.get(ref, 'parameters')
+      return unless CheckTemplates.mapping?(params)
+
+      cnode = CheckTemplates.get(params, 'command')
+      return unless cnode && CheckTemplates.scalar?(cnode)
+
+      cmd = cnode.value.to_s.strip.split(/\s+/).join(' ')
+      return if cmd.include?('$') # supplied by a parameter or variable
+
+      line = cnode.start_line + 1
+      unless @manifest.commands.key?(cmd)
+        add(path, line, 'tfci-param-command', "unknown tfci command '#{cmd}' (known: #{@manifest.commands.keys.join(', ')})")
+        return
+      end
+      allowed = @manifest.commands[cmd] | ['json']
+
+      anode = CheckTemplates.get(params, 'args')
+      if anode && CheckTemplates.scalar?(anode)
+        anode.value.to_s.gsub(PLACEHOLDER_RE, ' ').split(/\s+/).each do |w|
+          next unless w =~ /\A--?[A-Za-z]/
+
+          check_tfci_param_flag(path, anode.start_line + 1, cmd, flag_name(w), allowed, 'args')
+        end
+      end
+
+      tnode = CheckTemplates.get(params, 'textArgs')
+      return unless CheckTemplates.mapping?(tnode)
+
+      CheckTemplates.pairs(tnode).each do |k, _|
+        next unless CheckTemplates.scalar?(k)
+
+        name = k.value.to_s
+        next if CheckTemplates.expr?(name)
+
+        kline = k.start_line + 1
+        unless name =~ TEXT_ARG_KEY_RE
+          add(path, kline, 'tfci-param-command', "textArgs key '#{name}' must be letters and underscores only (it becomes an env var name)")
+          next
+        end
+        check_tfci_param_flag(path, kline, cmd, name, allowed, 'textArgs')
+      end
+    end
+
+    def check_tfci_param_flag(path, line, cmd, name, allowed, where)
+      return if allowed.include?(name)
+
+      msg = if @manifest.globals.include?(name)
+              "tfci global flag '--#{name}' in #{where}: the wrapper sets it from its own parameters"
+            else
+              "unknown flag '--#{name}' in #{where} for 'tfci #{cmd}' (flags: #{allowed.sort.join(', ')})"
+            end
+      add(path, line, 'tfci-param-command', msg)
     end
 
     # {name => {type:, has_default:}} or nil if the target does not parse.

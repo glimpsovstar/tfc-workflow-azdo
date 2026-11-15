@@ -1,0 +1,112 @@
+# Apply a run that is waiting for confirmation: `tfci run apply --json`.
+#
+# tfci waits until the run is applied and exits 1 when the apply errors, is
+# canceled or discarded, the run cannot be applied, or TF_MAX_TIMEOUT
+# (maxTimeout) passes. A run in planned_and_finished (no changes) has nothing
+# to apply: tfci returns 0 with status "Noop" (run_apply.go, v1.4.0) and this
+# template logs it, so the apply stage succeeds as a no-op.
+#
+# Output variables (step name = the `name` parameter, default "apply"):
+#   RUN_STATUS     e.g. applied, planned_and_finished
+#   APPLY_RESULT   tfci's status: Success or Noop
+# Same job:        $(apply.RUN_STATUS)
+#
+# comment must not contain PR text, branch names or other user-controlled
+# values. The default names the build only.
+parameters:
+  - name: name
+    type: string
+    default: apply
+  - name: displayName
+    type: string
+    default: Apply run
+  - name: runId
+    type: string
+  - name: comment
+    type: string
+    default: Applied by Azure DevOps build $(Build.BuildId)
+  # Connection parameters, passed through to tfci.yml unchanged. Same
+  # defaults as tfci.yml.
+  - name: mode
+    type: string
+    default: docker
+    values:
+      - docker
+      - native
+  - name: image
+    type: string
+    default: hashicorp/tfci:v1.4.0
+  - name: hostname
+    type: string
+    default: app.terraform.io
+  - name: organization
+    type: string
+  - name: caBundle
+    type: string
+    default: ''
+  - name: workingDirectory
+    type: string
+    default: $(System.DefaultWorkingDirectory)
+  - name: tokenVariable
+    type: string
+    default: TF_API_TOKEN
+  - name: maxTimeout
+    type: string
+    default: 1h
+
+steps:
+  - bash: |
+      set -euo pipefail
+      if [[ ! "$RUN_ID" =~ ^run-[A-Za-z0-9]+$ ]]; then
+        echo "##vso[task.logissue type=error]run-apply: runId '$RUN_ID' is not a run ID (run-...)"
+        exit 1
+      fi
+    name: ${{ parameters.name }}_check
+    displayName: ${{ parameters.displayName }} (check input)
+    env:
+      RUN_ID: ${{ parameters.runId }}
+
+  - template: tfci.yml
+    parameters:
+      name: ${{ parameters.name }}_tfci
+      displayName: ${{ parameters.displayName }}
+      command: run apply
+      textArgs:
+        run: ${{ parameters.runId }}
+        comment: ${{ parameters.comment }}
+      outputFile: $(Agent.TempDirectory)/tfci-${{ parameters.name }}.json
+      mode: ${{ parameters.mode }}
+      image: ${{ parameters.image }}
+      hostname: ${{ parameters.hostname }}
+      organization: ${{ parameters.organization }}
+      caBundle: ${{ parameters.caBundle }}
+      workingDirectory: ${{ parameters.workingDirectory }}
+      tokenVariable: ${{ parameters.tokenVariable }}
+      maxTimeout: ${{ parameters.maxTimeout }}
+
+  - bash: |
+      set -euo pipefail
+      result="$(jq -r '.status // empty' "$TFCI_OUT")"
+      run_status="$(jq -r '.run_status // empty' "$TFCI_OUT")"
+      case "$result" in
+        Success)
+          echo "run applied: $run_status"
+          ;;
+        Noop)
+          echo "nothing to apply: the run is $run_status (no changes), tfci returned 0"
+          ;;
+        *)
+          echo "##vso[task.logissue type=error]run-apply: unexpected tfci status '$result' after a zero exit"
+          exit 1
+          ;;
+      esac
+      if [[ ! "$run_status" =~ ^[a-z_]+$ ]]; then
+        echo "##vso[task.logissue type=error]run-apply: unexpected run_status '$run_status'"
+        exit 1
+      fi
+      echo "##vso[task.setvariable variable=RUN_STATUS;isOutput=true]$run_status"
+      echo "##vso[task.setvariable variable=APPLY_RESULT;isOutput=true]$result"
+    name: ${{ parameters.name }}
+    displayName: ${{ parameters.displayName }} (outputs)
+    env:
+      TFCI_OUT: $(Agent.TempDirectory)/tfci-${{ parameters.name }}.json

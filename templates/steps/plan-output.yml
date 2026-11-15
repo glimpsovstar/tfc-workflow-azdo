@@ -1,0 +1,145 @@
+# Read a plan's resource counts and write a markdown summary:
+# `tfci plan output --json`.
+#
+# tfci returns add, change and destroy (plan_output.go, v1.4.0). The other
+# summary fields (workspace, run link, run status, configuration version) are
+# not in that output, so they are parameters; pass the outputs of
+# run-create.yml and upload.yml.
+#
+# Writes summaryFile (default $(Agent.TempDirectory)/plan-summary.md) and
+# attaches it to the build summary with ##vso[task.uploadsummary].
+#
+# Output variables (step name = the `name` parameter, default "plan_output"):
+#   ADD, CHANGE, DESTROY
+# Same job:        $(plan_output.ADD)
+# Another job:     dependencies.<job>.outputs['plan_output.ADD']
+parameters:
+  - name: name
+    type: string
+    default: plan_output
+  - name: displayName
+    type: string
+    default: Plan summary
+  - name: planId
+    type: string
+  - name: workspace
+    type: string
+    default: ''
+  - name: runLink
+    type: string
+    default: ''
+  - name: runStatus
+    type: string
+    default: ''
+  - name: configurationVersionId
+    type: string
+    default: ''
+  - name: summaryFile
+    type: string
+    default: $(Agent.TempDirectory)/plan-summary.md
+  # Connection parameters, passed through to tfci.yml unchanged. Same
+  # defaults as tfci.yml.
+  - name: mode
+    type: string
+    default: docker
+    values:
+      - docker
+      - native
+  - name: image
+    type: string
+    default: hashicorp/tfci:v1.4.0
+  - name: hostname
+    type: string
+    default: app.terraform.io
+  - name: organization
+    type: string
+  - name: caBundle
+    type: string
+    default: ''
+  - name: workingDirectory
+    type: string
+    default: $(System.DefaultWorkingDirectory)
+  - name: tokenVariable
+    type: string
+    default: TF_API_TOKEN
+  - name: maxTimeout
+    type: string
+    default: 1h
+
+steps:
+  - bash: |
+      set -euo pipefail
+      if [[ ! "$PLAN_ID" =~ ^plan-[A-Za-z0-9]+$ ]]; then
+        echo "##vso[task.logissue type=error]plan-output: planId '$PLAN_ID' is not a plan ID (plan-...)"
+        exit 1
+      fi
+    name: ${{ parameters.name }}_check
+    displayName: ${{ parameters.displayName }} (check input)
+    env:
+      PLAN_ID: ${{ parameters.planId }}
+
+  - template: tfci.yml
+    parameters:
+      name: ${{ parameters.name }}_tfci
+      displayName: ${{ parameters.displayName }}
+      command: plan output
+      textArgs:
+        plan: ${{ parameters.planId }}
+      outputFile: $(Agent.TempDirectory)/tfci-${{ parameters.name }}.json
+      mode: ${{ parameters.mode }}
+      image: ${{ parameters.image }}
+      hostname: ${{ parameters.hostname }}
+      organization: ${{ parameters.organization }}
+      caBundle: ${{ parameters.caBundle }}
+      workingDirectory: ${{ parameters.workingDirectory }}
+      tokenVariable: ${{ parameters.tokenVariable }}
+      maxTimeout: ${{ parameters.maxTimeout }}
+
+  - bash: |
+      set -euo pipefail
+      field() { jq -r --arg k "$1" '.[$k] // empty' "$TFCI_OUT"; }
+      add="$(field add)"
+      change="$(field change)"
+      destroy="$(field destroy)"
+      plan_status="$(field plan_status)"
+      for n in "$add" "$change" "$destroy"; do
+        if [[ ! "$n" =~ ^[0-9]+$ ]]; then
+          echo "##vso[task.logissue type=error]plan-output: add, change and destroy must be numbers in $TFCI_OUT (got '$add' '$change' '$destroy')"
+          exit 1
+        fi
+      done
+      # An unset macro arrives as the literal "$(name)"; show it as unknown.
+      # shellcheck disable=SC2016 # literal "$(" on purpose
+      show() { if [[ -z "$1" || "$1" == '$('* ]]; then echo "unknown"; else echo "$1"; fi; }
+      link="$(show "$RUN_LINK")"
+      if [[ "$link" =~ ^https:// ]]; then link="[$link]($link)"; fi
+
+      mkdir -p "$(dirname "$SUMMARY_FILE")"
+      {
+        echo "## Terraform plan: $(show "$WORKSPACE")"
+        echo
+        echo "Run: $link"
+        echo
+        echo "Run status: \`$(show "$RUN_STATUS")\`, plan status: \`$(show "$plan_status")\`"
+        echo
+        echo "| Add | Change | Destroy |"
+        echo "|----:|-------:|--------:|"
+        echo "| $add | $change | $destroy |"
+        echo
+        echo "Configuration version: \`$(show "$CV_ID")\`"
+      } >"$SUMMARY_FILE"
+      cat "$SUMMARY_FILE"
+
+      echo "##vso[task.setvariable variable=ADD;isOutput=true]$add"
+      echo "##vso[task.setvariable variable=CHANGE;isOutput=true]$change"
+      echo "##vso[task.setvariable variable=DESTROY;isOutput=true]$destroy"
+      echo "##vso[task.uploadsummary]$SUMMARY_FILE"
+    name: ${{ parameters.name }}
+    displayName: ${{ parameters.displayName }} (write summary)
+    env:
+      TFCI_OUT: $(Agent.TempDirectory)/tfci-${{ parameters.name }}.json
+      SUMMARY_FILE: ${{ parameters.summaryFile }}
+      WORKSPACE: ${{ parameters.workspace }}
+      RUN_LINK: ${{ parameters.runLink }}
+      RUN_STATUS: ${{ parameters.runStatus }}
+      CV_ID: ${{ parameters.configurationVersionId }}
